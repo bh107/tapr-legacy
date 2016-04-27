@@ -1,0 +1,14 @@
+invdb = "./inventory.db"
+chunkdb = "./chunk.db"
+mountroot = "/ltfs"
+
+
+[libraries]
+
+#  [libraries.secondary]
+#  changer = "/dev/sg4"
+#  drives = ["write:/dev/st1", "read:/dev/st0"]
+
+  [libraries.primary]
+  changer = "/dev/sg7"
+  drives = ["write:/dev/st3", "read:/dev/st2"]
