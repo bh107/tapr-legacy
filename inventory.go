@@ -1,10 +1,10 @@
 package tapr
 
 import (
-	"bytes"
 	"database/sql"
 
 	// import for side effects (load the sqlite3 driver)
+	"github.com/kbj/mtx"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -12,24 +12,19 @@ type Inventory struct {
 	db *sql.DB
 }
 
-func (inv *Inventory) slot(vol *Volume) (*Slot, error) {
-	row := inv.db.QueryRow(`SELECT slot, library FROM volume WHERE serial = ?`, vol.Serial)
+func (inv *Inventory) locate(vol *mtx.Volume) (string, error) {
+	row := inv.db.QueryRow(`SELECT library FROM volume WHERE serial = ?`, vol.Serial)
 
-	var slotnum int
 	var libname string
 
-	if err := row.Scan(&slotnum, &libname); err != nil {
-		return nil, err
+	if err := row.Scan(&libname); err != nil {
+		return "", err
 	}
 
-	return &Slot{
-		ID:      slotnum,
-		Volume:  vol,
-		Libname: libname,
-	}, nil
+	return libname, nil
 }
 
-func (inv *Inventory) volumes(libname string) ([]*Volume, error) {
+func (inv *Inventory) volumes(libname string) ([]*mtx.Volume, error) {
 	rows, err := inv.db.Query(`
 		SELECT serial
 		FROM volume
@@ -39,14 +34,14 @@ func (inv *Inventory) volumes(libname string) ([]*Volume, error) {
 		return nil, err
 	}
 
-	var vols []*Volume
+	var vols []*mtx.Volume
 	for rows.Next() {
 		var serial string
 		if err := rows.Scan(&serial); err != nil {
 			return nil, err
 		}
 
-		vols = append(vols, &Volume{Serial: serial})
+		vols = append(vols, &mtx.Volume{Serial: serial})
 	}
 
 	if err := rows.Err(); err != nil {
@@ -56,7 +51,7 @@ func (inv *Inventory) volumes(libname string) ([]*Volume, error) {
 	return vols, nil
 }
 
-func (inv *Inventory) scratch(libname string) (*Volume, error) {
+func (inv *Inventory) scratch(libname string) (*mtx.Volume, error) {
 	tx, err := inv.db.Begin()
 	if err != nil {
 		return nil, err
@@ -101,26 +96,21 @@ func (inv *Inventory) scratch(libname string) (*Volume, error) {
 		panic(err)
 	}
 
-	return &Volume{Serial: serial, Slot: slot}, nil
+	return &mtx.Volume{Serial: serial, Home: slot}, nil
 }
 
-func (inv *Inventory) audit(b []byte, libname string) (*mtxStatus, error) {
-	status, err := mtxParseStatus(bytes.NewReader(b))
-	if err != nil {
-		return nil, err
-	}
-
+func (inv *Inventory) audit(status *mtx.Status, libname string) error {
 	// update volume locations
-	for _, slot := range status.slots {
-		if slot.vol != nil {
+	for _, slot := range status.Slots {
+		if slot.Vol != nil {
 			// try to insert the row
 			_, err := inv.db.Exec(`
 				INSERT OR IGNORE INTO volume (serial, slot, status, library)
 				VALUES (?, ?, ?, ?)
-			`, slot.vol.Serial, slot.id, "scratch", libname)
+			`, slot.Vol.Serial, slot.Num, "scratch", libname)
 
 			if err != nil {
-				return nil, err
+				return err
 			}
 
 			// if it was ignored, make sure slot is updated... but EXPLICITLY
@@ -129,13 +119,13 @@ func (inv *Inventory) audit(b []byte, libname string) (*mtxStatus, error) {
 				UPDATE volume
 				SET slot = ?, library = ?
 				WHERE serial = ?
-			`, slot.id, libname, slot.vol.Serial)
+			`, slot.Num, libname, slot.Vol.Serial)
 
 			if err != nil {
-				return nil, err
+				return err
 			}
 		}
 	}
 
-	return status, nil
+	return nil
 }

@@ -13,6 +13,8 @@ import (
 
 const (
 	LTFSSyncModeUnmount = "unmount"
+	LTFSSyncModeTime    = "time@5min"
+	LTFSSyncModeClose   = "close"
 )
 
 // LTFS represents an LTFS formatted volume, possibly mounted.
@@ -26,9 +28,10 @@ type LTFS struct {
 }
 
 const (
-	mountCmd   string = "/usr/local/bin/ltfs"
-	unmountCmd string = "fusermount -u"
-	mkltfsCmd  string = "/usr/local/bin/mkltfs"
+	mountCmd    string = "/usr/local/bin/ltfs"
+	mountCmdFmt string = "%s %s -o direct_io -o sync_type=%s -o devname=%s -o log_directory=/tmp"
+	unmountCmd  string = "fusermount -u"
+	mkltfsCmd   string = "/usr/local/bin/mkltfs"
 )
 
 var (
@@ -44,9 +47,7 @@ func NewLTFS(drv *Drive, root string, synctype string, format bool) (*LTFS, erro
 	}
 
 	// build ltfs command line
-	rawcmd := fmt.Sprintf("ltfs %s -o direct_io -o sync_type=%s -o devname=%s -o log_directory=/tmp",
-		mountpoint, synctype, drv.path,
-	)
+	rawcmd := fmt.Sprintf(mountCmdFmt, mountCmd, mountpoint, synctype, drv.path)
 
 	ltfs := &LTFS{
 		drv:        drv,

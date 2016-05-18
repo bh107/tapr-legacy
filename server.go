@@ -13,6 +13,8 @@ import (
 
 	"github.com/boltdb/bolt"
 	"github.com/golang/glog"
+	"github.com/kbj/mtx"
+	"github.com/kbj/mtx/mock"
 )
 
 var chunkdb *bolt.DB
@@ -59,7 +61,7 @@ func New(configpath string) (*Server, error) {
 
 	// initialize libraries
 	for k, v := range config.Libraries {
-		lib := NewLibrary(k, &Changer{path: v.Changer})
+		lib := NewLibrary(k, &Changer{Changer: mtx.NewChanger(mock.New(8, 32, 4, 16))})
 
 		// writers
 		for slot, path := range v.Drives {
@@ -81,16 +83,16 @@ func New(configpath string) (*Server, error) {
 			return nil, err
 		}
 
-		for i, elem := range status.tapedevs {
+		for i, elem := range status.Drives {
 			if i > len(lib.drives)-1 {
 				break
 			}
 
-			if elem.vol != nil {
-				glog.Infof("drive %s has volume %s loaded", lib.drives[i], elem.vol)
+			if elem.Vol != nil {
+				glog.Infof("drive %s has volume %s loaded", lib.drives[i], elem.Vol)
 			}
 
-			lib.drives[i].vol = elem.vol
+			lib.drives[i].vol = elem.Vol
 		}
 
 		for _, drv := range srv.libraries[k].drives {
@@ -106,11 +108,11 @@ func New(configpath string) (*Server, error) {
 	return srv, nil
 }
 
-func (srv *Server) Volumes(libname string) ([]*Volume, error) {
+func (srv *Server) Volumes(libname string) ([]*mtx.Volume, error) {
 	return inv.volumes(libname)
 }
 
-func (srv *Server) Load(dev *Drive, vol *Volume) error {
+func (srv *Server) Load(dev *Drive, vol *mtx.Volume) error {
 	if dev.vol != nil {
 		if dev.vol.Serial == vol.Serial {
 			glog.Infof("drive %s already loaded with %s", dev, vol)
@@ -119,9 +121,9 @@ func (srv *Server) Load(dev *Drive, vol *Volume) error {
 	}
 
 	err := dev.lib.chgr.use(func(tx *Tx) error {
-		glog.Infof("loading drive %s with volume %s from slot %d", dev, vol, vol.Slot)
+		glog.Infof("loading drive %s with volume %s from slot %d", dev, vol, vol.Home)
 		var err error
-		err = tx.load(vol.Slot, dev.slot)
+		err = tx.load(vol.Home, dev.slot)
 		if err != nil {
 			if exitError, ok := err.(*exec.ExitError); ok {
 				return errors.New(string(exitError.Stderr))
@@ -149,9 +151,9 @@ func (srv *Server) Unload(dev *Drive) error {
 	}
 
 	err := dev.lib.chgr.use(func(tx *Tx) error {
-		glog.Infof("unloading drive %s, returning volume %s to slot %d", dev, dev.vol, dev.vol.Slot)
+		glog.Infof("unloading drive %s, returning volume %s to slot %d", dev, dev.vol, dev.vol.Home)
 		var err error
-		err = tx.unload(dev.vol.Slot, dev.slot)
+		err = tx.unload(dev.vol.Home, dev.slot)
 		if err != nil {
 			if exitError, ok := err.(*exec.ExitError); ok {
 				return errors.New(string(exitError.Stderr))
@@ -166,13 +168,14 @@ func (srv *Server) Unload(dev *Drive) error {
 	return err
 }
 
-func (srv *Server) Audit(libname string) (*mtxStatus, error) {
+func (srv *Server) Audit(libname string) (*mtx.Status, error) {
 	if lib, ok := srv.libraries[libname]; ok {
 		glog.Infof("auditing %s library", libname)
 
-		var status *mtxStatus
+		var status *mtx.Status
 		err := lib.chgr.use(func(tx *Tx) error {
-			out, err := tx.status()
+			var err error
+			status, err = tx.status()
 			if err != nil {
 				if exitError, ok := err.(*exec.ExitError); ok {
 					return errors.New(string(exitError.Stderr))
@@ -182,7 +185,7 @@ func (srv *Server) Audit(libname string) (*mtxStatus, error) {
 			}
 
 			// we do all auditing inside the changer lock
-			status, err = inv.audit(out, libname)
+			err = inv.audit(status, libname)
 			return err
 		})
 
@@ -208,13 +211,13 @@ func (srv *Server) Retrieve(wr io.Writer, name string) error {
 
 	for _, vol := range vols {
 		// locate the slot this volume is in
-		slot, err := inv.slot(vol)
+		lib, err := inv.locate(vol)
 		if err != nil {
 			return err
 		}
 
 		// find a read drive to use
-		for _, drv := range srv.libraries[slot.Libname].drives {
+		for _, drv := range srv.libraries[lib].drives {
 			if drv.devtype == "read" {
 				if drv.vol != nil {
 					// damn, read drive is already in use, is it already the correct volume?
@@ -324,7 +327,7 @@ func (srv *Server) chunks(name string) (*Archive, error) {
 				ar.chunks.PushBack(&Chunk{
 					id:      int(id),
 					archive: ar,
-					vol:     &Volume{Serial: string(v)},
+					vol:     &mtx.Volume{Serial: string(v)},
 				})
 			}
 

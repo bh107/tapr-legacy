@@ -1,27 +1,21 @@
 package tapr
 
 import (
-	"os/exec"
-	"strconv"
 	"sync"
 
-	"github.com/bh107/tapr/internal/util"
+	"github.com/kbj/mtx"
 )
 
 type Changer struct {
-	sync.Mutex
+	*mtx.Changer
 
-	path string
-}
-
-func (chgr *Changer) String() string {
-	return chgr.path
+	mu sync.Mutex
 }
 
 // execute fn with exclusive use of the changer
 func (chgr *Changer) use(fn func(*Tx) error) error {
-	defer chgr.Unlock()
-	chgr.Lock()
+	defer chgr.mu.Unlock()
+	chgr.mu.Lock()
 
 	tx := &Tx{chgr: chgr}
 
@@ -36,18 +30,14 @@ type Tx struct {
 	chgr *Changer
 }
 
-func (tx *Tx) status() ([]byte, error) {
-	return exec.Command(mtxCmd, "-f", tx.chgr.path, "status").Output()
+func (tx *Tx) status() (*mtx.Status, error) {
+	return tx.chgr.Status()
 }
 
 func (tx *Tx) load(slot int, drivenum int) error {
-	cmd := exec.Command(mtxCmd, "-f", tx.chgr.path, "load", strconv.Itoa(slot), strconv.Itoa(drivenum))
-
-	return util.ExecCmd(cmd)
+	return tx.chgr.Load(slot, drivenum)
 }
 
 func (tx *Tx) unload(slot int, drivenum int) error {
-	cmd := exec.Command(mtxCmd, "-f", tx.chgr.path, "unload", strconv.Itoa(slot), strconv.Itoa(drivenum))
-
-	return util.ExecCmd(cmd)
+	return tx.chgr.Unload(slot, drivenum)
 }

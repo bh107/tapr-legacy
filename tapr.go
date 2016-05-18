@@ -3,24 +3,11 @@ package tapr
 import (
 	"container/list"
 	"fmt"
+
+	"github.com/kbj/mtx"
 )
 
 var mtxCmd = "/usr/sbin/mtx"
-
-type Volume struct {
-	Serial string
-	Slot   int
-}
-
-func (vol *Volume) String() string {
-	return vol.Serial
-}
-
-type Slot struct {
-	ID      int
-	Volume  *Volume
-	Libname string
-}
 
 var DefaultPolicy = &Policy{
 	Exclusive: false,
@@ -46,15 +33,15 @@ func (ar *Archive) String() string {
 	return fmt.Sprintf("%s(%d chunks)", ar.name, ar.chunks.Len())
 }
 
-func (ar *Archive) Volumes() []*Volume {
+func (ar *Archive) Volumes() []*mtx.Volume {
 	var seen map[string]bool
 	for e := ar.chunks.Front(); e != nil; e = e.Next() {
 		seen[e.Value.(string)] = true
 	}
 
-	var vols []*Volume
+	var vols []*mtx.Volume
 	for serial := range seen {
-		vols = append(vols, &Volume{Serial: serial})
+		vols = append(vols, &mtx.Volume{Serial: serial})
 	}
 
 	return vols
@@ -63,7 +50,7 @@ func (ar *Archive) Volumes() []*Volume {
 type Chunk struct {
 	id      int
 	archive *Archive
-	vol     *Volume
+	vol     *mtx.Volume
 
 	buf  []byte
 	size int

@@ -1,12 +1,14 @@
 package tapr
 
+import "github.com/kbj/mtx"
+
 type Drive struct {
 	path    string
 	devtype string
 	slot    int
 	lib     *Library
 
-	vol *Volume
+	vol *mtx.Volume
 
 	wr *ChunkWriter
 }
