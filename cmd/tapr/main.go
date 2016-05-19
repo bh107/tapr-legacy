@@ -10,32 +10,6 @@ import (
 	"github.com/golang/glog"
 )
 
-/*
-type api struct {
-	lib *tapr.Library
-}
-
-func (api api) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	// PUT request
-	// 	parse request as /archive/<id>/
-	// 	allocate scratch volume or use existing volume with free space
-	//	mount scratch volume in /ltfs/<serial>/ (if not mounted already)
-	//  chunk incoming stream into <id>XXXX where XXXX is a running number
-	//   record each chunk in chunkdb as key:<id>XXXX value:<serial>
-	//   write chunk as <id>XXXX in /ltfs/<serial>/
-
-	// GET request
-	//  parse request as /archive/<id>/
-	//  lookup chunks in chunkdb to get list of volume serials (sorted in chunk order)
-	//  for each volume/serial
-	//   mount volume in /ltfs/<serial>/
-	//   read chunks and transfer to client
-	//   unmount volume
-
-	log.Println(req.URL.Path)
-}
-*/
-
 func main() {
 	flag.Parse()
 

@@ -1,4 +1,4 @@
-package util
+package tapr
 
 import (
 	"bytes"
@@ -8,27 +8,27 @@ import (
 )
 
 // itob returns an 8-byte big endian representation of v.
-func Itob(v int) []byte {
+func itob(v int) []byte {
 	b := make([]byte, 8)
 	binary.BigEndian.PutUint64(b, uint64(v))
 	return b
 }
 
-func ExecCmd(cmd *exec.Cmd) error {
+func run(cmd *exec.Cmd) ([]byte, error) {
 	var stderr bytes.Buffer
 
 	if cmd.Stderr == nil {
 		cmd.Stderr = &stderr
 	}
 
-	err := cmd.Run()
+	out, err := cmd.Output()
 	if err != nil {
 		if exitError, ok := err.(*exec.ExitError); ok {
-			return fmt.Errorf("%s: %s", exitError, stderr.String())
+			return out, fmt.Errorf("%s: %s", exitError, stderr.String())
 		}
 
-		return err
+		return out, err
 	}
 
-	return nil
+	return out, nil
 }

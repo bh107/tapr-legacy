@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path"
 
-	"github.com/bh107/tapr/internal/util"
 	"github.com/golang/glog"
 )
 
@@ -72,7 +71,7 @@ func NewLTFS(drv *Drive, root string, synctype string, format bool) (*LTFS, erro
 func (ltfs *LTFS) format() error {
 	cmd := exec.Command("sh", "-c", fmt.Sprintf("%s -d %s", mkltfsCmd, ltfs.drv.path))
 
-	err := util.ExecCmd(cmd)
+	_, err := run(cmd)
 	if err != nil {
 		return err
 	}
@@ -84,7 +83,7 @@ func (ltfs *LTFS) mount() error {
 	glog.Infof("mounting volume %s on %s", ltfs.drv.vol, ltfs.mountpoint)
 	cmd := exec.Command("sh", "-c", ltfs.rawcmd)
 
-	err := util.ExecCmd(cmd)
+	_, err := run(cmd)
 	if err != nil {
 		return err
 	}
@@ -100,7 +99,7 @@ func (ltfs *LTFS) unmount() error {
 	glog.Infof("unmounting volume %s on %s", ltfs.drv.vol, ltfs.mountpoint)
 	cmd := exec.Command(unmountCmd, ltfs.mountpoint)
 
-	err := util.ExecCmd(cmd)
+	_, err := run(cmd)
 	if err != nil {
 		return err
 	}
@@ -114,7 +113,7 @@ func (ltfs *LTFS) unmount() error {
 		),
 	)
 
-	err = util.ExecCmd(waiter)
+	_, err = run(waiter)
 	if err != nil {
 		return err
 	}

@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bh107/tapr/internal/util"
 	"github.com/boltdb/bolt"
 	"github.com/golang/glog"
 )
@@ -165,7 +164,7 @@ func runChunkWriter(wr *ChunkWriter) {
 
 			chunkid = int(id)
 
-			return bkt.Put(util.Itob(chunkid), []byte(wr.drv.vol.Serial))
+			return bkt.Put(itob(chunkid), []byte(wr.drv.vol.Serial))
 		})
 
 		if chunkid == 1 {
