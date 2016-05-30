@@ -1,6 +1,9 @@
 package tapr
 
-import "github.com/kbj/mtx"
+import (
+	"github.com/bh107/tapr/mtx"
+	"github.com/bh107/tapr/stream"
+)
 
 type Drive struct {
 	path    string
@@ -10,7 +13,7 @@ type Drive struct {
 
 	vol *mtx.Volume
 
-	wr *ChunkWriter
+	wr *stream.Writer
 }
 
 func NewDrive(path string, devtype string, slot int, lib *Library) *Drive {

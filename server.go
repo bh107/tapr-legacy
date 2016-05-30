@@ -2,66 +2,63 @@ package tapr
 
 import (
 	"bufio"
-	"database/sql"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os/exec"
+	"path"
 	"strings"
+
+	"golang.org/x/net/context"
+
+	"github.com/bh107/tapr/changer"
+	"github.com/bh107/tapr/inventory"
+	"github.com/bh107/tapr/ltfs"
+	"github.com/bh107/tapr/mtx"
+	"github.com/bh107/tapr/mtx/mock"
+	"github.com/bh107/tapr/stream"
 
 	"github.com/boltdb/bolt"
 	"github.com/golang/glog"
-	"github.com/kbj/mtx"
-	"github.com/kbj/mtx/mock"
 )
-
-var chunkdb *bolt.DB
-var inv *Inventory
 
 type Server struct {
 	libraries map[string]*Library
 	ltfsRoot  string
-	xferStats xferStats
+
+	chunkdb *bolt.DB
+	inv     *inventory.Inventory
 }
 
-func New(configpath string) (*Server, error) {
+func NewServer(configpath string) (*Server, error) {
+	srv := new(Server)
+
+	// load config
 	config, err := loadConfig("./config.toml")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	db, err := sql.Open("sqlite3", config.Invdb)
-	if err != nil {
-		return nil, err
-	}
-
-	chunkdb, err = bolt.Open(config.Chunkdb, 0600, nil)
+	// open chunk store
+	srv.chunkdb, err = bolt.Open(config.Chunkdb, 0600, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// create the global archive list
-	if err := chunkdb.Update(func(tx *bolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists([]byte("archivelist"))
-
-		return err
-	}); err != nil {
-		return nil, err
+	// initialize the inventory
+	srv.inv, err = inventory.New(config.Invdb)
+	if err != nil {
+		log.Fatal(err)
 	}
 
-	inv = &Inventory{db: db}
-
-	srv := &Server{
-		libraries: make(map[string]*Library),
-		ltfsRoot:  config.Mountroot,
-		xferStats: xferStats{},
-	}
+	srv.libraries = make(map[string]*Library)
+	srv.ltfsRoot = config.Mountroot
 
 	// initialize libraries
 	for k, v := range config.Libraries {
-		lib := NewLibrary(k, &Changer{Changer: mtx.NewChanger(mock.New(8, 32, 4, 16))})
+		lib := NewLibrary(k, &changer.Changer{Changer: mtx.NewChanger(mock.New(8, 32, 4, 16))})
 
 		// writers
 		for slot, path := range v.Drives {
@@ -78,7 +75,7 @@ func New(configpath string) (*Server, error) {
 
 		srv.libraries[k] = lib
 
-		status, err := srv.Audit(k)
+		status, err := srv.Audit(context.Background(), k)
 		if err != nil {
 			return nil, err
 		}
@@ -98,9 +95,12 @@ func New(configpath string) (*Server, error) {
 		for _, drv := range srv.libraries[k].drives {
 			if drv.devtype == "write" {
 				glog.Infof("starting chunk writer on %s in %s library", drv, k)
-				if drv.wr, err = NewChunkWriter(srv, drv, 32); err != nil {
+				handle, err := ltfs.New(drv.path)
+				if err != nil {
 					return nil, err
 				}
+
+				drv.wr = stream.NewWriter(handle)
 			}
 		}
 	}
@@ -109,7 +109,7 @@ func New(configpath string) (*Server, error) {
 }
 
 func (srv *Server) Volumes(libname string) ([]*mtx.Volume, error) {
-	return inv.volumes(libname)
+	return srv.inv.Volumes(libname)
 }
 
 func (srv *Server) Load(dev *Drive, vol *mtx.Volume) error {
@@ -120,10 +120,10 @@ func (srv *Server) Load(dev *Drive, vol *mtx.Volume) error {
 		}
 	}
 
-	err := dev.lib.chgr.use(func(tx *Tx) error {
+	err := dev.lib.chgr.Use(func(tx *changer.Tx) error {
 		glog.Infof("loading drive %s with volume %s from slot %d", dev, vol, vol.Home)
 		var err error
-		err = tx.load(vol.Home, dev.slot)
+		err = tx.Load(vol.Home, dev.slot)
 		if err != nil {
 			if exitError, ok := err.(*exec.ExitError); ok {
 				return errors.New(string(exitError.Stderr))
@@ -150,10 +150,10 @@ func (srv *Server) Unload(dev *Drive) error {
 		return nil
 	}
 
-	err := dev.lib.chgr.use(func(tx *Tx) error {
+	err := dev.lib.chgr.Use(func(tx *changer.Tx) error {
 		glog.Infof("unloading drive %s, returning volume %s to slot %d", dev, dev.vol, dev.vol.Home)
 		var err error
-		err = tx.unload(dev.vol.Home, dev.slot)
+		err = tx.Unload(dev.vol.Home, dev.slot)
 		if err != nil {
 			if exitError, ok := err.(*exec.ExitError); ok {
 				return errors.New(string(exitError.Stderr))
@@ -168,14 +168,14 @@ func (srv *Server) Unload(dev *Drive) error {
 	return err
 }
 
-func (srv *Server) Audit(libname string) (*mtx.Status, error) {
+func (srv *Server) Audit(ctx context.Context, libname string) (*mtx.Status, error) {
 	if lib, ok := srv.libraries[libname]; ok {
 		glog.Infof("auditing %s library", libname)
 
 		var status *mtx.Status
-		err := lib.chgr.use(func(tx *Tx) error {
+		err := lib.chgr.Use(func(tx *changer.Tx) error {
 			var err error
-			status, err = tx.status()
+			status, err = tx.Status()
 			if err != nil {
 				if exitError, ok := err.(*exec.ExitError); ok {
 					return errors.New(string(exitError.Stderr))
@@ -185,7 +185,7 @@ func (srv *Server) Audit(libname string) (*mtx.Status, error) {
 			}
 
 			// we do all auditing inside the changer lock
-			err = inv.audit(status, libname)
+			err = srv.inv.Audit(status, libname)
 			return err
 		})
 
@@ -211,7 +211,7 @@ func (srv *Server) Retrieve(wr io.Writer, name string) error {
 
 	for _, vol := range vols {
 		// locate the slot this volume is in
-		lib, err := inv.locate(vol)
+		lib, err := srv.inv.Locate(vol)
 		if err != nil {
 			return err
 		}
@@ -232,9 +232,14 @@ func (srv *Server) Retrieve(wr io.Writer, name string) error {
 					return fmt.Errorf("could not load volume: %s", err)
 				}
 
-				ltfs, err := NewLTFS(drv, srv.ltfsRoot, LTFSSyncModeUnmount, false)
+				handle, err := ltfs.New(drv.path)
 				if err != nil {
-					return fmt.Errorf("could not mount LTFS file system: %s", err)
+					return fmt.Errorf("could not create LTFS handle: %s", err)
+				}
+
+				mountpoint := path.Join(srv.ltfsRoot, vol.Serial)
+				if err := handle.Mount(mountpoint, ltfs.SyncModeUnmount); err != nil {
+					return fmt.Errorf("failed to mount LTFS file system: %s", err)
 				}
 
 				for e := archive.chunks.Front(); e != nil; e = e.Next() {
@@ -242,7 +247,7 @@ func (srv *Server) Retrieve(wr io.Writer, name string) error {
 					_ = cnk
 				}
 
-				if err := ltfs.unmount(); err != nil {
+				if err := handle.Unmount(); err != nil {
 					return fmt.Errorf("could not unmount LTFS file system: %s", err)
 				}
 
@@ -263,7 +268,7 @@ func (srv *Server) Store(archive string, rd io.Reader, policy *Policy) error {
 	drv := srv.libraries["primary"].drives[0]
 
 	// get chunkwriter
-	stream := NewStream(archive, drv.wr)
+	stream := stream.New(drv.wr)
 
 	r := bufio.NewReader(rd)
 
@@ -284,11 +289,11 @@ func (srv *Server) Store(archive string, rd io.Reader, policy *Policy) error {
 			return err
 		}
 
-		if err := stream.Add(buf); err != nil {
+		if err != nil && err != io.EOF {
 			return err
 		}
 
-		if err != nil && err != io.EOF {
+		if err := stream.Add(buf); err != nil {
 			return err
 		}
 	}
@@ -302,21 +307,21 @@ func (srv *Server) Store(archive string, rd io.Reader, policy *Policy) error {
 
 func (srv *Server) Shutdown() {
 	glog.Info("shutdown: starting...")
-	chunkdb.Close()
+	srv.chunkdb.Close()
 	glog.Info("shutdown: chunkdb closed")
-	inv.db.Close()
+	srv.inv.Close()
 	glog.Info("shutdown: inv closed")
 
 	glog.Info("shutdown: stats")
-	glog.Infof("+ total bytes transfered: %d", srv.xferStats.totalBytes)
-	glog.Infof("+ total transfer time: %v", srv.xferStats.total)
+	//glog.Infof("+ total bytes transfered: %d", srv.xferStats.totalBytes)
+	//glog.Infof("+ total transfer time: %v", srv.xferStats.total)
 }
 
 // Return a slice of chunks of the archive
 func (srv *Server) chunks(name string) (*Archive, error) {
 	ar := NewArchive(name)
 
-	err := chunkdb.View(func(tx *bolt.Tx) error {
+	err := srv.chunkdb.View(func(tx *bolt.Tx) error {
 		if bkt := tx.Bucket([]byte(name)); bkt != nil {
 			c := bkt.Cursor()
 
@@ -345,7 +350,7 @@ func (srv *Server) chunks(name string) (*Archive, error) {
 }
 
 func (srv *Server) Create(archive string) error {
-	return chunkdb.Update(func(tx *bolt.Tx) error {
+	return srv.chunkdb.Update(func(tx *bolt.Tx) error {
 		_, err := tx.CreateBucket([]byte(archive))
 		if err != nil {
 			return fmt.Errorf("create bucket: %s", err)

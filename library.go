@@ -1,12 +1,14 @@
 package tapr
 
+import "github.com/bh107/tapr/changer"
+
 type Library struct {
 	name   string
-	chgr   *Changer
+	chgr   *changer.Changer
 	drives []*Drive
 }
 
-func NewLibrary(name string, chgr *Changer) *Library {
+func NewLibrary(name string, chgr *changer.Changer) *Library {
 	return &Library{
 		name:   name,
 		chgr:   chgr,

@@ -4,15 +4,12 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"golang.org/x/net/context"
-
 	"github.com/bh107/tapr"
 	"github.com/golang/glog"
 	"github.com/gorilla/mux"
 )
 
-func List(ctx context.Context, rw http.ResponseWriter, req *http.Request) {
-	srv := ctx.Value("srv").(*tapr.Server)
+func List(srv *tapr.Server, rw http.ResponseWriter, req *http.Request) {
 	vars := mux.Vars(req)
 
 	if libname, ok := vars["library"]; ok {

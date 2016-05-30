@@ -7,8 +7,6 @@ import (
 	"github.com/bh107/tapr"
 	"github.com/golang/glog"
 	"github.com/gorilla/mux"
-
-	"golang.org/x/net/context"
 )
 
 type Status struct {
@@ -20,9 +18,7 @@ func internalServerError(rw http.ResponseWriter, err error) {
 	http.Error(rw, err.Error(), http.StatusInternalServerError)
 }
 
-func Store(ctx context.Context, rw http.ResponseWriter, req *http.Request) {
-	srv := ctx.Value("srv").(*tapr.Server)
-
+func Store(srv *tapr.Server, rw http.ResponseWriter, req *http.Request) {
 	vars := mux.Vars(req)
 
 	if archive, ok := vars["id"]; ok {
@@ -43,9 +39,7 @@ func Store(ctx context.Context, rw http.ResponseWriter, req *http.Request) {
 	http.Error(rw, "Bad Request", http.StatusBadRequest)
 }
 
-func Retrieve(ctx context.Context, rw http.ResponseWriter, req *http.Request) {
-	srv := ctx.Value("srv").(*tapr.Server)
-
+func Retrieve(srv *tapr.Server, rw http.ResponseWriter, req *http.Request) {
 	vars := mux.Vars(req)
 
 	if archive, ok := vars["id"]; ok {

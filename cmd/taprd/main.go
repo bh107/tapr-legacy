@@ -15,7 +15,7 @@ func main() {
 
 	config := "./config.toml"
 
-	tapr, err := tapr.New(config)
+	srv, err := tapr.NewServer(config)
 	if err != nil {
 		glog.Fatal(err)
 	}
@@ -25,10 +25,10 @@ func main() {
 	go func() {
 		<-c
 
-		tapr.Shutdown()
+		srv.Shutdown()
 		os.Exit(0)
 	}()
 
 	// start the API
-	glog.Fatal(api.Start(tapr))
+	glog.Fatal(api.Start(srv))
 }

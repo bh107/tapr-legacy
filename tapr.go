@@ -4,7 +4,7 @@ import (
 	"container/list"
 	"fmt"
 
-	"github.com/kbj/mtx"
+	"github.com/bh107/tapr/mtx"
 )
 
 var mtxCmd = "/usr/sbin/mtx"

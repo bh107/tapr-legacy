@@ -3,8 +3,6 @@ package api
 import (
 	"net/http"
 
-	"golang.org/x/net/context"
-
 	"github.com/bh107/tapr"
 	"github.com/bh107/tapr/api/cmd"
 	"github.com/bh107/tapr/api/obj"
@@ -17,7 +15,26 @@ type Route struct {
 	name    string
 	method  string
 	pattern string
-	handler CtxHandlerFunc
+	handler HandlerFunc
+}
+
+type Handler interface {
+	ServeHTTP(*tapr.Server, http.ResponseWriter, *http.Request)
+}
+
+type HandlerFunc func(*tapr.Server, http.ResponseWriter, *http.Request)
+
+func (h HandlerFunc) ServeHTTP(srv *tapr.Server, rw http.ResponseWriter, req *http.Request) {
+	h(srv, rw, req)
+}
+
+type Wrapper struct {
+	srv *tapr.Server
+	h   Handler
+}
+
+func (w Wrapper) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	w.h.ServeHTTP(w.srv, rw, req)
 }
 
 var routes = []Route{
@@ -34,8 +51,8 @@ func NewRouter(srv *tapr.Server) *mux.Router {
 	for _, route := range routes {
 		var handler http.Handler
 
-		handler = &CtxWrapper{
-			ctx: context.WithValue(context.Background(), "srv", srv),
+		handler = &Wrapper{
+			srv: srv,
 			h:   route.handler,
 		}
 

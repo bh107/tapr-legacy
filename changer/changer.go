@@ -1,9 +1,9 @@
-package tapr
+package changer
 
 import (
 	"sync"
 
-	"github.com/kbj/mtx"
+	"github.com/bh107/tapr/mtx"
 )
 
 type Changer struct {
@@ -13,7 +13,7 @@ type Changer struct {
 }
 
 // execute fn with exclusive use of the changer
-func (chgr *Changer) use(fn func(*Tx) error) error {
+func (chgr *Changer) Use(fn func(*Tx) error) error {
 	defer chgr.mu.Unlock()
 	chgr.mu.Lock()
 
@@ -30,14 +30,14 @@ type Tx struct {
 	chgr *Changer
 }
 
-func (tx *Tx) status() (*mtx.Status, error) {
+func (tx *Tx) Status() (*mtx.Status, error) {
 	return tx.chgr.Status()
 }
 
-func (tx *Tx) load(slot int, drivenum int) error {
+func (tx *Tx) Load(slot int, drivenum int) error {
 	return tx.chgr.Load(slot, drivenum)
 }
 
-func (tx *Tx) unload(slot int, drivenum int) error {
+func (tx *Tx) Unload(slot int, drivenum int) error {
 	return tx.chgr.Unload(slot, drivenum)
 }

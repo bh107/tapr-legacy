@@ -31,3 +31,6 @@ _testmain.go
 
 # test files
 data/
+
+# attic
+attic/

@@ -1,10 +1,10 @@
-package tapr
+package inventory
 
 import (
 	"database/sql"
 
 	// import for side effects (load the sqlite3 driver)
-	"github.com/kbj/mtx"
+	"github.com/bh107/tapr/mtx"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -12,7 +12,17 @@ type Inventory struct {
 	db *sql.DB
 }
 
-func (inv *Inventory) locate(vol *mtx.Volume) (string, error) {
+func New(dbname string) (*Inventory, error) {
+	// open inventory database
+	db, err := sql.Open("sqlite3", dbname)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Inventory{db: db}, nil
+}
+
+func (inv *Inventory) Locate(vol *mtx.Volume) (string, error) {
 	row := inv.db.QueryRow(`SELECT library FROM volume WHERE serial = ?`, vol.Serial)
 
 	var libname string
@@ -24,7 +34,7 @@ func (inv *Inventory) locate(vol *mtx.Volume) (string, error) {
 	return libname, nil
 }
 
-func (inv *Inventory) volumes(libname string) ([]*mtx.Volume, error) {
+func (inv *Inventory) Volumes(libname string) ([]*mtx.Volume, error) {
 	rows, err := inv.db.Query(`
 		SELECT serial
 		FROM volume
@@ -51,7 +61,7 @@ func (inv *Inventory) volumes(libname string) ([]*mtx.Volume, error) {
 	return vols, nil
 }
 
-func (inv *Inventory) scratch(libname string) (*mtx.Volume, error) {
+func (inv *Inventory) GetScratch(libname string) (*mtx.Volume, error) {
 	tx, err := inv.db.Begin()
 	if err != nil {
 		return nil, err
@@ -99,7 +109,11 @@ func (inv *Inventory) scratch(libname string) (*mtx.Volume, error) {
 	return &mtx.Volume{Serial: serial, Home: slot}, nil
 }
 
-func (inv *Inventory) audit(status *mtx.Status, libname string) error {
+func (inv *Inventory) Close() {
+	inv.db.Close()
+}
+
+func (inv *Inventory) Audit(status *mtx.Status, libname string) error {
 	// update volume locations
 	for _, slot := range status.Slots {
 		if slot.Vol != nil {
