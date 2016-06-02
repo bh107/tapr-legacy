@@ -1,42 +1,48 @@
 package tapr
 
 import (
-	"io/ioutil"
-	"os"
+	"bytes"
+	"io"
 
-	"github.com/naoina/toml"
+	"github.com/hashicorp/hcl"
 )
 
-type config struct {
-	Libraries map[string]libraryConf
-
-	Invdb   string
-	Chunkdb string
-
-	Mountroot string
+type LTFSConfig struct {
+	Root string `hcl:"root"`
 }
 
-type libraryConf struct {
-	Changer string
-	Drives  []string
+type DrivesConfig struct {
+	DriveType string   `hcl:",key"`
+	Devices   []string `hcl:"devices"`
 }
 
-func loadConfig(path string) (*config, error) {
-	// load config
-	f, err := os.Open(path)
+type LibraryConfig struct {
+	Name    string         `hcl:",key"`
+	Changer string         `hcl:"changer"`
+	Drives  []DrivesConfig `hcl:"drives"`
+}
+
+type Config struct {
+	Mock      bool            `hcl:"mock"`
+	LTFS      LTFSConfig      `hcl:"ltfs"`
+	Libraries []LibraryConfig `hcl:"library"`
+}
+
+func ParseConfig(r io.Reader) (*Config, error) {
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		return nil, err
+	}
+
+	hclTree, err := hcl.Parse(buf.String())
 	if err != nil {
 		return nil, err
 	}
 
-	buf, err := ioutil.ReadAll(f)
-	if err != nil {
+	result := new(Config)
+	if err := hcl.DecodeObject(&result, hclTree); err != nil {
 		return nil, err
 	}
 
-	var config config
-	if err := toml.Unmarshal(buf, &config); err != nil {
-		return nil, err
-	}
-
-	return &config, nil
+	return result, nil
 }

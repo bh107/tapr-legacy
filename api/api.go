@@ -3,10 +3,10 @@ package api
 import (
 	"net/http"
 
-	"github.com/bh107/tapr"
 	"github.com/bh107/tapr/api/cmd"
 	"github.com/bh107/tapr/api/obj"
 	"github.com/bh107/tapr/api/vol"
+	"github.com/bh107/tapr/server"
 	"github.com/golang/glog"
 	"github.com/gorilla/mux"
 )
@@ -19,17 +19,17 @@ type Route struct {
 }
 
 type Handler interface {
-	ServeHTTP(*tapr.Server, http.ResponseWriter, *http.Request)
+	ServeHTTP(*server.Server, http.ResponseWriter, *http.Request)
 }
 
-type HandlerFunc func(*tapr.Server, http.ResponseWriter, *http.Request)
+type HandlerFunc func(*server.Server, http.ResponseWriter, *http.Request)
 
-func (h HandlerFunc) ServeHTTP(srv *tapr.Server, rw http.ResponseWriter, req *http.Request) {
+func (h HandlerFunc) ServeHTTP(srv *server.Server, rw http.ResponseWriter, req *http.Request) {
 	h(srv, rw, req)
 }
 
 type Wrapper struct {
-	srv *tapr.Server
+	srv *server.Server
 	h   Handler
 }
 
@@ -45,7 +45,7 @@ var routes = []Route{
 }
 
 // build routes from routes.go and wrap them with net/context
-func NewRouter(srv *tapr.Server) *mux.Router {
+func NewRouter(srv *server.Server) *mux.Router {
 	router := mux.NewRouter().StrictSlash(true)
 
 	for _, route := range routes {
@@ -67,7 +67,7 @@ func NewRouter(srv *tapr.Server) *mux.Router {
 
 	return router
 }
-func Start(srv *tapr.Server) error {
+func Start(srv *server.Server) error {
 	router := NewRouter(srv)
 
 	glog.Info("starting http server...")

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/bh107/tapr"
+	"github.com/bh107/tapr/server"
 	"github.com/golang/glog"
 	"github.com/gorilla/mux"
 )
@@ -18,7 +18,7 @@ func internalServerError(rw http.ResponseWriter, err error) {
 	http.Error(rw, err.Error(), http.StatusInternalServerError)
 }
 
-func Store(srv *tapr.Server, rw http.ResponseWriter, req *http.Request) {
+func Store(srv *server.Server, rw http.ResponseWriter, req *http.Request) {
 	vars := mux.Vars(req)
 
 	if archive, ok := vars["id"]; ok {
@@ -27,7 +27,7 @@ func Store(srv *tapr.Server, rw http.ResponseWriter, req *http.Request) {
 			return
 		}
 
-		if err := srv.Store(archive, req.Body, tapr.DefaultPolicy); err != nil {
+		if err := srv.Store(archive, req.Body); err != nil {
 			internalServerError(rw, err)
 			return
 		}
@@ -39,18 +39,20 @@ func Store(srv *tapr.Server, rw http.ResponseWriter, req *http.Request) {
 	http.Error(rw, "Bad Request", http.StatusBadRequest)
 }
 
-func Retrieve(srv *tapr.Server, rw http.ResponseWriter, req *http.Request) {
-	vars := mux.Vars(req)
+func Retrieve(srv *server.Server, rw http.ResponseWriter, req *http.Request) {
+	/*
+		vars := mux.Vars(req)
 
-	if archive, ok := vars["id"]; ok {
-		if err := srv.Retrieve(rw, archive); err != nil {
-			glog.Error(err)
-			http.Error(rw, err.Error(), http.StatusInternalServerError)
-			return
-		}
+			if archive, ok := vars["id"]; ok {
+				if err := srv.Retrieve(rw, archive); err != nil {
+					glog.Error(err)
+					http.Error(rw, err.Error(), http.StatusInternalServerError)
+					return
+				}
 
-		return
-	}
+				return
+			}
+	*/
 
 	http.Error(rw, "Not implemented", http.StatusNotImplemented)
 }

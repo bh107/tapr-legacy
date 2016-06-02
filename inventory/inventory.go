@@ -12,7 +12,7 @@ type Inventory struct {
 	db *sql.DB
 }
 
-func New(dbname string) (*Inventory, error) {
+func Open(dbname string) (*Inventory, error) {
 	// open inventory database
 	db, err := sql.Open("sqlite3", dbname)
 	if err != nil {

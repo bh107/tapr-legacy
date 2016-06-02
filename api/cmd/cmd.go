@@ -6,13 +6,12 @@ import (
 
 	"golang.org/x/net/context"
 
-	"github.com/bh107/tapr"
-
+	"github.com/bh107/tapr/server"
 	"github.com/golang/glog"
 	"github.com/gorilla/mux"
 )
 
-func Audit(srv *tapr.Server, rw http.ResponseWriter, req *http.Request) {
+func Audit(srv *server.Server, rw http.ResponseWriter, req *http.Request) {
 	vars := mux.Vars(req)
 
 	ctx, cancel := context.WithCancel(context.Background())

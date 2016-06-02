@@ -1,14 +1,12 @@
-package tapr
+package server
 
 import (
 	"bufio"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os/exec"
-	"path"
 	"strings"
 
 	"golang.org/x/net/context"
@@ -32,7 +30,7 @@ type Server struct {
 	inv     *inventory.Inventory
 }
 
-func NewServer(configpath string) (*Server, error) {
+func New(configpath string) (*Server, error) {
 	srv := new(Server)
 
 	// load config
@@ -48,7 +46,7 @@ func NewServer(configpath string) (*Server, error) {
 	}
 
 	// initialize the inventory
-	srv.inv, err = inventory.New(config.Invdb)
+	srv.inv, err = inventory.Open(config.Invdb)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -201,6 +199,7 @@ func (srv *Server) Audit(ctx context.Context, libname string) (*mtx.Status, erro
 	return nil, fmt.Errorf("unknown library: %s", libname)
 }
 
+/*
 func (srv *Server) Retrieve(wr io.Writer, name string) error {
 	archive, err := srv.chunks(name)
 	if err != nil {
@@ -243,7 +242,7 @@ func (srv *Server) Retrieve(wr io.Writer, name string) error {
 				}
 
 				for e := archive.chunks.Front(); e != nil; e = e.Next() {
-					cnk := e.Value.(*Chunk)
+					cnk := e.Value.(*stream.Chunk)
 					_ = cnk
 				}
 
@@ -260,9 +259,10 @@ func (srv *Server) Retrieve(wr io.Writer, name string) error {
 
 	return nil
 }
+*/
 
 // Store grabs an io.Reader, reads until EOF and stores the data on a tape.
-func (srv *Server) Store(archive string, rd io.Reader, policy *Policy) error {
+func (srv *Server) Store(archive string, rd io.Reader) error {
 	glog.Infof("store archive: %s", archive)
 
 	drv := srv.libraries["primary"].drives[0]
@@ -318,6 +318,7 @@ func (srv *Server) Shutdown() {
 }
 
 // Return a slice of chunks of the archive
+/*
 func (srv *Server) chunks(name string) (*Archive, error) {
 	ar := NewArchive(name)
 
@@ -329,7 +330,7 @@ func (srv *Server) chunks(name string) (*Archive, error) {
 			for k, v := c.First(); k != nil; k, v = c.Next() {
 				id, _ := binary.Varint(k)
 
-				ar.chunks.PushBack(&Chunk{
+				ar.chunks.PushBack(&stream.Chunk{
 					id:      int(id),
 					archive: ar,
 					vol:     &mtx.Volume{Serial: string(v)},
@@ -348,7 +349,7 @@ func (srv *Server) chunks(name string) (*Archive, error) {
 
 	return ar, nil
 }
-
+*/
 func (srv *Server) Create(archive string) error {
 	return srv.chunkdb.Update(func(tx *bolt.Tx) error {
 		_, err := tx.CreateBucket([]byte(archive))

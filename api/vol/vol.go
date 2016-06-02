@@ -4,12 +4,12 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/bh107/tapr"
+	"github.com/bh107/tapr/server"
 	"github.com/golang/glog"
 	"github.com/gorilla/mux"
 )
 
-func List(srv *tapr.Server, rw http.ResponseWriter, req *http.Request) {
+func List(srv *server.Server, rw http.ResponseWriter, req *http.Request) {
 	vars := mux.Vars(req)
 
 	if libname, ok := vars["library"]; ok {

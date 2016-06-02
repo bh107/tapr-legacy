@@ -1,4 +1,4 @@
-package tapr
+package server
 
 import "github.com/bh107/tapr/changer"
 
