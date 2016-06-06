@@ -5,14 +5,13 @@ import "github.com/bh107/tapr/changer"
 type Library struct {
 	name   string
 	chgr   *changer.Changer
-	drives []*Drive
+	drives map[string][]*Drive
 }
 
-func NewLibrary(name string, chgr *changer.Changer) *Library {
+func NewLibrary(name string) *Library {
 	return &Library{
 		name:   name,
-		chgr:   chgr,
-		drives: []*Drive{},
+		drives: make(map[string][]*Drive),
 	}
 }
 

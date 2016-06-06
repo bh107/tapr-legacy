@@ -4,12 +4,26 @@ import (
 	"sync"
 
 	"github.com/bh107/tapr/mtx"
+	"github.com/bh107/tapr/mtx/mock"
+	"github.com/bh107/tapr/mtx/scsi"
 )
 
 type Changer struct {
 	*mtx.Changer
 
 	mu sync.Mutex
+}
+
+func New(path string, mocked bool) *Changer {
+	if mocked {
+		return &Changer{
+			Changer: mtx.NewChanger(mock.New(path)),
+		}
+	}
+
+	return &Changer{
+		Changer: mtx.NewChanger(scsi.New(path)),
+	}
 }
 
 // execute fn with exclusive use of the changer

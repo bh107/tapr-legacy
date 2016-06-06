@@ -2,18 +2,25 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
+	"os/signal"
 
 	"github.com/bh107/tapr"
+	"github.com/bh107/tapr/api"
+	"github.com/bh107/tapr/config"
+	"github.com/bh107/tapr/server"
 	"github.com/spf13/cobra"
 )
 
 var (
-	cfgFile     string
-	config      *tapr.Config
+	cfgFile string
+	cfg     *config.Config
+
 	showVersion bool
 	debug       bool
 	runAudit    bool
+	mock        bool
 )
 
 var rootCmd = &cobra.Command{
@@ -38,7 +45,11 @@ func init() {
 		"debug", "D", false, "enable debug mode",
 	)
 
-	rootCmd.PersistentFlags().BoolVarP(&runAudit,
+	rootCmd.PersistentFlags().BoolVar(&mock,
+		"mock", false, "enable mocking",
+	)
+
+	rootCmd.Flags().BoolVarP(&runAudit,
 		"audit", "A", false, "run initial inventory audit",
 	)
 }
@@ -49,9 +60,17 @@ func initConfig() {
 		os.Exit(1)
 	}
 
+	if debug {
+		fmt.Println("[+] debug enabled")
+		log.SetFlags(log.Lshortfile | log.Ltime)
+	}
+
+	if mock {
+		fmt.Println("[+] mocking enabled")
+	}
+
 	if cfgFile == "" {
-		fmt.Fprintln(os.Stderr, "please specify config file")
-		os.Exit(1)
+		cfgFile = "./tapr.conf"
 	}
 
 	f, err := os.Open(cfgFile)
@@ -62,7 +81,7 @@ func initConfig() {
 
 	defer f.Close()
 
-	config, err = tapr.ParseConfig(f)
+	cfg, err = config.Parse(f)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "failed to parse config file:", err)
 		os.Exit(1)
@@ -70,7 +89,22 @@ func initConfig() {
 }
 
 func run(cmd *cobra.Command, args []string) {
-	fmt.Println("run")
+	srv, err := server.New(cfg, debug, runAudit, mock)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
+	go func() {
+		<-c
+
+		srv.Shutdown()
+		os.Exit(0)
+	}()
+
+	api.Start(srv)
 }
 
 func main() {

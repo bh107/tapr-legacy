@@ -1,10 +1,9 @@
 package api
 
 import (
+	"log"
 	"net/http"
 	"time"
-
-	"github.com/golang/glog"
 )
 
 func logger(h http.Handler, name string) http.Handler {
@@ -13,7 +12,7 @@ func logger(h http.Handler, name string) http.Handler {
 
 		h.ServeHTTP(w, r)
 
-		glog.Infof(
+		log.Printf(
 			"%s\t%s\t%s\t%s",
 			r.Method,
 			r.RequestURI,

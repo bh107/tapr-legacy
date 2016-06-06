@@ -4,5 +4,5 @@ create table volume (
 	serial text not null unique,
 	slot integer,
 	status text not null,
-	library string
+	library text
 );

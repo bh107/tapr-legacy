@@ -2,10 +2,10 @@ package obj
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 
 	"github.com/bh107/tapr/server"
-	"github.com/golang/glog"
 	"github.com/gorilla/mux"
 )
 
@@ -14,7 +14,7 @@ type Status struct {
 }
 
 func internalServerError(rw http.ResponseWriter, err error) {
-	glog.Error(err)
+	log.Print(err)
 	http.Error(rw, err.Error(), http.StatusInternalServerError)
 }
 
@@ -45,7 +45,7 @@ func Retrieve(srv *server.Server, rw http.ResponseWriter, req *http.Request) {
 
 			if archive, ok := vars["id"]; ok {
 				if err := srv.Retrieve(rw, archive); err != nil {
-					glog.Error(err)
+					log.Print(err)
 					http.Error(rw, err.Error(), http.StatusInternalServerError)
 					return
 				}

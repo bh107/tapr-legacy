@@ -2,12 +2,12 @@ package cmd
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 
 	"golang.org/x/net/context"
 
 	"github.com/bh107/tapr/server"
-	"github.com/golang/glog"
 	"github.com/gorilla/mux"
 )
 
@@ -19,7 +19,7 @@ func Audit(srv *server.Server, rw http.ResponseWriter, req *http.Request) {
 
 	if libname, ok := vars["library"]; ok {
 		if _, err := srv.Audit(ctx, libname); err != nil {
-			glog.Error(err)
+			log.Print(err)
 
 			http.Error(rw, fmt.Sprintf("cmd/audit failed: %s", err),
 				http.StatusInternalServerError,

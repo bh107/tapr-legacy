@@ -2,10 +2,10 @@ package vol
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 
 	"github.com/bh107/tapr/server"
-	"github.com/golang/glog"
 	"github.com/gorilla/mux"
 )
 
@@ -16,7 +16,7 @@ func List(srv *server.Server, rw http.ResponseWriter, req *http.Request) {
 
 		vols, err := srv.Volumes(libname)
 		if err != nil {
-			glog.Error(err)
+			log.Print(err)
 			http.Error(rw, "volumes/list failed", http.StatusInternalServerError)
 
 			return
@@ -24,7 +24,7 @@ func List(srv *server.Server, rw http.ResponseWriter, req *http.Request) {
 
 		js, err := json.Marshal(vols)
 		if err != nil {
-			glog.Error(err)
+			log.Print(err)
 			http.Error(rw, "volumes/list failed", http.StatusInternalServerError)
 
 			return

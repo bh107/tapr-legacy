@@ -1,13 +1,13 @@
 package api
 
 import (
+	"log"
 	"net/http"
 
 	"github.com/bh107/tapr/api/cmd"
 	"github.com/bh107/tapr/api/obj"
 	"github.com/bh107/tapr/api/vol"
 	"github.com/bh107/tapr/server"
-	"github.com/golang/glog"
 	"github.com/gorilla/mux"
 )
 
@@ -70,6 +70,6 @@ func NewRouter(srv *server.Server) *mux.Router {
 func Start(srv *server.Server) error {
 	router := NewRouter(srv)
 
-	glog.Info("starting http server...")
+	log.Print("http-api: starting http server...")
 	return http.ListenAndServe(":8080", router)
 }

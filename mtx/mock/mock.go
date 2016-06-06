@@ -12,6 +12,8 @@ import (
 
 // Changer represents a mock library auto changer.
 type Changer struct {
+	name string
+
 	drives []*mtx.Slot
 	slots  []*mtx.Slot
 
@@ -20,19 +22,42 @@ type Changer struct {
 	numMailSlots    int
 }
 
+var DefaultSpec = &Spec{8, 32, 4, 16}
+
+type Spec struct {
+	NumDrives       int
+	NumStorageSlots int
+	NumMailSlots    int
+	NumVolumes      int
+}
+
+var serialCounter int
+var serialPrefixes = []rune{'A', 'B', 'C'}
+
+func New(name string) *Changer {
+	if serialCounter > len(serialPrefixes)-1 {
+		panic("cannot allocate serial prefix")
+	}
+	serialPrefix := serialPrefixes[serialCounter]
+	serialCounter++
+
+	return NewWithSpec(name, serialPrefix, DefaultSpec)
+}
+
 // New returns a mock library auto changer initialized with numDrives slots for
 // drives, numStorageSlots slots for volume storage and numVolumes slots as
 // import/export mail slots. It populates the first numVolumes storage slots
 // with mock volumes with serials starting at S00000L6. A cleaning cartridge
 // with serial CLN000L1 is added to the last storage slot and an extra volume
 // is added to the last import/export slot.
-func New(numDrives, numStorageSlots, numMailSlots, numVolumes int) *Changer {
+func NewWithSpec(name string, serialPrefix rune, spec *Spec) *Changer {
 	chgr := &Changer{
-		drives:          make([]*mtx.Slot, numDrives),
-		slots:           make([]*mtx.Slot, numStorageSlots+numMailSlots),
-		numDrives:       numDrives,
-		numStorageSlots: numStorageSlots,
-		numMailSlots:    numMailSlots,
+		name:            name,
+		drives:          make([]*mtx.Slot, spec.NumDrives),
+		slots:           make([]*mtx.Slot, spec.NumStorageSlots+spec.NumMailSlots),
+		numDrives:       spec.NumDrives,
+		numStorageSlots: spec.NumStorageSlots,
+		numMailSlots:    spec.NumMailSlots,
 	}
 
 	for i := range chgr.drives {
@@ -43,29 +68,29 @@ func New(numDrives, numStorageSlots, numMailSlots, numVolumes int) *Changer {
 		chgr.slots[i] = &mtx.Slot{Num: i + 1, Type: mtx.StorageSlot}
 
 		// fill half of the storage slots with volumes
-		if i < numVolumes {
+		if i < spec.NumVolumes {
 			chgr.slots[i].Vol = &mtx.Volume{
-				Serial: fmt.Sprintf("S%05dL6", i),
+				Serial: fmt.Sprintf("%c%05dL6", serialPrefix, i),
 				Home:   i + 1,
 			}
 		}
 
 		// put a cleaning cartridge in the last storage slot for good measure
-		if i == numStorageSlots-1 {
+		if i == spec.NumStorageSlots-1 {
 			chgr.slots[i].Vol = &mtx.Volume{
-				Serial: "CLN000L1",
+				Serial: fmt.Sprintf("CLN%03dL1", serialCounter),
 				Home:   i + 1,
 			}
 		}
 
-		if i >= numStorageSlots {
+		if i >= spec.NumStorageSlots {
 			chgr.slots[i].Type = mtx.MailSlot
 		}
 
 		// put a volume in the last mail slot
-		if i == numStorageSlots+numMailSlots-1 {
+		if i == spec.NumStorageSlots+spec.NumMailSlots-1 {
 			chgr.slots[i].Vol = &mtx.Volume{
-				Serial: fmt.Sprintf("S%05dL6", numVolumes),
+				Serial: fmt.Sprintf("%c%05dL6", serialPrefix, spec.NumVolumes),
 				Home:   i,
 			}
 		}

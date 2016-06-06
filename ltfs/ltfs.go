@@ -1,4 +1,6 @@
 // Package ltfs functions as a wrapper around the LTFS binaries.
+//
+// +build linux
 package ltfs
 
 import (
@@ -7,8 +9,10 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"strconv"
+	"syscall"
 
-	"github.com/bh107/tapr/osutil"
+	"github.com/bh107/tapr/util"
 )
 
 const (
@@ -26,21 +30,21 @@ type Handle struct {
 	synctype string
 
 	mounted bool
+
+	proc *os.Process
 }
 
 const (
-	ltfsBinary  string = "/usr/local/bin/ltfs"
-	mountCmdFmt string = "%s %s -o direct_io -o sync_type=%s -o devname=%s -o log_directory=/tmp"
-	unmountCmd  string = "fusermount -u"
-	mkltfsCmd   string = "/usr/local/bin/mkltfs"
+	ltfsCmd    string = "/usr/local/bin/ltfs"
+	unmountCmd string = "fusermount -u"
+	mkltfsCmd  string = "/usr/local/bin/mkltfs"
 )
 
 var (
 	ErrNotMounted = errors.New("ltfs: volume not mounted")
 )
 
-// New returns a new LTFS handle and formats the volume at the device if
-// requested.
+// New returns a new LTFS handle.
 func New(devpath string) (*Handle, error) {
 	finfo, err := os.Stat(devpath)
 	if err != nil {
@@ -63,9 +67,9 @@ func (h *Handle) Format() error {
 		return errors.New("volume mounted")
 	}
 
-	cmd := exec.Command("sh", "-c", fmt.Sprintf("%s -d %s", mkltfsCmd, h.devpath))
+	cmd := exec.Command(mkltfsCmd, fmt.Sprintf("-d %s", h.devpath))
 
-	_, err := osutil.Run(cmd)
+	_, err := util.Run(cmd)
 	if err != nil {
 		return err
 	}
@@ -73,28 +77,54 @@ func (h *Handle) Format() error {
 	return nil
 }
 
-func (h *Handle) Mount(path string, mode string) error {
-	finfo, err := os.Stat(path)
+func (h *Handle) Mount(mountpoint string, mode string) error {
+	finfo, err := os.Stat(mountpoint)
 	if err != nil {
 		return err
 	}
 
 	if !finfo.IsDir() {
-		return fmt.Errorf("%s does not exist", path)
+		return fmt.Errorf("%s does not exist", mountpoint)
 	}
 
-	// build ltfs command line
-	h.rawcmd = fmt.Sprintf(mountCmdFmt, ltfsBinary, path, mode, h.devpath)
-	h.mountpoint = path
+	h.mountpoint = mountpoint
 
-	cmd := exec.Command("sh", "-c", h.rawcmd)
+	ltfsOptions := []string{
+		mountpoint,
 
-	_, err = osutil.Run(cmd)
+		fmt.Sprintf("-o devname=%s", h.devpath),
+		fmt.Sprintf("-o sync_type=%s", mode),
+
+		"-o direct_io", "-o log_drectory=/tmp",
+	}
+
+	cmd := exec.Command(ltfsCmd, ltfsOptions...)
+
+	_, err = util.Run(cmd)
 	if err != nil {
 		return err
 	}
 
 	h.mounted = true
+
+	// The LTFS process goes to the background, not reporting the PID. So, do
+	// some evil stuff and find it.
+	out, err := exec.Command("pgrep", "-f", fmt.Sprintf("ltfs %s", h.mountpoint)).Output()
+	if err != nil {
+		panic(err)
+	}
+
+	pid, err := strconv.Atoi(string(out[:len(out)-1]))
+	if err != nil {
+		panic(err)
+	}
+
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		panic(err)
+	}
+
+	h.proc = proc
 
 	return nil
 }
@@ -108,24 +138,22 @@ func (h *Handle) Create(filepath string) (*os.File, error) {
 func (h *Handle) Unmount() error {
 	cmd := exec.Command(unmountCmd, h.mountpoint)
 
-	_, err := osutil.Run(cmd)
+	_, err := util.Run(cmd)
 	if err != nil {
 		return err
+	}
+
+	state, err := h.proc.Wait()
+	if err != nil {
+		return err
+	}
+
+	if !state.Success() {
+		status := state.Sys().(syscall.WaitStatus)
+		return fmt.Errorf("ltfs process exited with status %d", status.ExitStatus())
 	}
 
 	h.mounted = false
-
-	// wait for ltfs to terminate. sigh.
-	waiter := exec.Command("sh", "-c",
-		fmt.Sprintf("'while pgrep -xf \"%s\" > /dev/null; do sleep 1; done'",
-			h.rawcmd,
-		),
-	)
-
-	_, err = osutil.Run(waiter)
-	if err != nil {
-		return err
-	}
 
 	return nil
 }

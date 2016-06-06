@@ -8,21 +8,21 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-type Inventory struct {
+type DB struct {
 	db *sql.DB
 }
 
-func Open(dbname string) (*Inventory, error) {
+func Open(dbname string) (*DB, error) {
 	// open inventory database
 	db, err := sql.Open("sqlite3", dbname)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Inventory{db: db}, nil
+	return &DB{db: db}, nil
 }
 
-func (inv *Inventory) Locate(vol *mtx.Volume) (string, error) {
+func (inv *DB) Locate(vol *mtx.Volume) (string, error) {
 	row := inv.db.QueryRow(`SELECT library FROM volume WHERE serial = ?`, vol.Serial)
 
 	var libname string
@@ -34,7 +34,7 @@ func (inv *Inventory) Locate(vol *mtx.Volume) (string, error) {
 	return libname, nil
 }
 
-func (inv *Inventory) Volumes(libname string) ([]*mtx.Volume, error) {
+func (inv *DB) Volumes(libname string) ([]*mtx.Volume, error) {
 	rows, err := inv.db.Query(`
 		SELECT serial
 		FROM volume
@@ -61,7 +61,7 @@ func (inv *Inventory) Volumes(libname string) ([]*mtx.Volume, error) {
 	return vols, nil
 }
 
-func (inv *Inventory) GetScratch(libname string) (*mtx.Volume, error) {
+func (inv *DB) GetScratch(libname string) (*mtx.Volume, error) {
 	tx, err := inv.db.Begin()
 	if err != nil {
 		return nil, err
@@ -109,11 +109,11 @@ func (inv *Inventory) GetScratch(libname string) (*mtx.Volume, error) {
 	return &mtx.Volume{Serial: serial, Home: slot}, nil
 }
 
-func (inv *Inventory) Close() {
+func (inv *DB) Close() {
 	inv.db.Close()
 }
 
-func (inv *Inventory) Audit(status *mtx.Status, libname string) error {
+func (inv *DB) Audit(status *mtx.Status, libname string) error {
 	// update volume locations
 	for _, slot := range status.Slots {
 		if slot.Vol != nil {
