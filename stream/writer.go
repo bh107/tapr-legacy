@@ -15,9 +15,8 @@ type Writer struct {
 	in   chan *Chunk
 	agg  chan *Chunk
 
-	mu        sync.RWMutex
-	attached  int
-	exclusive bool
+	mu       sync.RWMutex
+	attached int
 
 	released chan struct{}
 }
@@ -30,8 +29,7 @@ type WriteManager struct {
 
 	agg chan *Chunk
 
-	mu              sync.RWMutex
-	exclusiveQueued int
+	exclusiveWaiter chan struct{}
 }
 
 func NewWriteManager(root string, numWriters int) *WriteManager {
@@ -90,18 +88,16 @@ func (m *WriteManager) Get(timeout <-chan struct{}, exclusive bool) *Writer {
 func (m *WriteManager) GetShared(timeout <-chan struct{}) *Writer {
 	var wr *Writer
 
-	m.mu.RLock()
-	if m.exclusiveQueued > 0 {
-		m.mu.RUnlock()
-		// don't wait on the shared channel, queue up for a fresh unused
-		// channel
+	select {
+	case <-m.exclusiveWaiter:
+		// don't grab a shared channel, wait for unused so the exclusive writer
+		// can get a chance.
 		select {
 		case <-timeout:
 			return nil
 		case wr = <-m.unused:
 		}
-	} else {
-		m.mu.RUnlock()
+	default:
 		// try either
 		select {
 		case <-timeout:
@@ -127,18 +123,14 @@ func (m *WriteManager) GetShared(timeout <-chan struct{}) *Writer {
 // GetExclusive returns a writer or nil if timeout was closed before one could
 // be acquired.
 func (m *WriteManager) GetExclusive(timeout <-chan struct{}) *Writer {
-	m.mu.Lock()
-	m.exclusiveQueued++
-	m.mu.Unlock()
+	// tell the communal hippies that we want the table for our selves and
+	// don't wanna starve!
+	go func() { m.exclusiveWaiter <- struct{}{} }()
 
 	select {
 	case <-timeout:
 		return nil
 	case wr := <-m.unused:
-		m.mu.Lock()
-		m.exclusiveQueued--
-		m.mu.Unlock()
-
 		// wait until released, then put back as unused
 		go func() { <-wr.released; m.unused <- wr }()
 
