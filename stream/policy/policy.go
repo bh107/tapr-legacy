@@ -2,6 +2,7 @@ package policy
 
 import (
 	"net/http"
+	"strconv"
 
 	"golang.org/x/net/context"
 )
@@ -10,8 +11,7 @@ type Policy struct {
 	AcknowledgedWrite bool
 
 	ParallelWrite struct {
-		Accepted bool
-		Want     bool
+		Level int
 	}
 
 	Exclusive bool
@@ -27,13 +27,12 @@ func Construct(req *http.Request) (*Policy, error) {
 	}
 
 	v = req.Header.Get("Parallel-Write")
-	switch v {
-	case "want":
-		pol.ParallelWrite.Want = true
-		fallthrough
-	case "accepted":
-		pol.ParallelWrite.Accepted = true
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return nil, err
 	}
+
+	pol.ParallelWrite.Level = n
 
 	if v = req.Header.Get("Exclusive"); v == "yes" {
 		pol.Exclusive = true

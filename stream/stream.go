@@ -10,6 +10,8 @@ type Stream struct {
 	out chan *Chunk
 
 	chunkpool *ChunkPool
+
+	writers []*Writer
 }
 
 func New(out chan *Chunk) *Stream {
@@ -24,7 +26,7 @@ func New(out chan *Chunk) *Stream {
 }
 
 func (s *Stream) AddWriter(wr *Writer) {
-
+	s.writers = append(s.writers, wr)
 }
 
 func (s *Stream) Add(p []byte) error {

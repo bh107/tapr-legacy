@@ -295,23 +295,44 @@ func (srv *Server) Retrieve(wr io.Writer, name string) error {
 func (srv *Server) Store(ctx context.Context, archive string, rd io.Reader) error {
 	log.Printf("store archive: %s", archive)
 
-	var exclusive bool
-	var writer *stream.Writer
+	var (
+		exclusive bool
+		parallel  bool
+		parlevel  int
+
+		writer  *stream.Writer
+		writers []*stream.Writer
+		writec  chan *stream.Chunk
+	)
 
 	// see if there is a write policy associated
 	if pol, ok := policy.Unwrap(ctx); ok {
 		if pol.Exclusive {
 			exclusive = true
 		}
+
+		if pol.ParallelWrite.Level != 0 {
+			parallel = true
+			parlevel = pol.ParallelWrite.Level
+		}
 	}
 
-	writer = srv.writeManager.Get(ctx.Done(), exclusive)
+	if parallel {
+		writers, writec = srv.writeManager.GetParallel(ctx.Done(), parlevel, exclusive)
+	} else {
+		writer, writec = srv.writeManager.Get(ctx.Done(), exclusive)
+		writers = append(writers, writer)
+	}
 
-	if writer == nil {
+	if len(writers) == 0 {
 		return ctx.Err()
 	}
 
-	stream := stream.New(writer.In())
+	stream := stream.New(writec)
+
+	for _, wr := range writers {
+		stream.AddWriter(wr)
+	}
 
 	reader := bufio.NewReader(rd)
 

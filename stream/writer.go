@@ -62,17 +62,17 @@ func (m *WriteManager) NewWriter(vol *mtx.Volume) {
 	go func() { m.unused <- wr }()
 }
 
-func (m *WriteManager) Get(timeout <-chan struct{}, exclusive bool) *Writer {
+func (m *WriteManager) Get(timeout <-chan struct{}, exclusive bool) (*Writer, chan *Chunk) {
 	var wr *Writer
 
 	if exclusive {
-		wr = m.GetExclusive(timeout)
+		wr, _ = m.GetExclusive(timeout)
 	} else {
-		wr = m.GetShared(timeout)
+		wr, _ = m.GetShared(timeout)
 	}
 
 	if wr == nil {
-		return nil
+		return nil, nil
 	}
 
 	wr.mu.Lock()
@@ -80,28 +80,65 @@ func (m *WriteManager) Get(timeout <-chan struct{}, exclusive bool) *Writer {
 
 	wr.attached++
 
-	return wr
+	return wr, wr.in
+}
+
+func (m *WriteManager) GetParallelShared(timeout <-chan struct{}, level int) ([]*Writer, chan *Chunk) {
+	return m.GetParallel(timeout, level, false)
+}
+
+func (m *WriteManager) GetParallelExclusive(timeout <-chan struct{}, level int) ([]*Writer, chan *Chunk) {
+	return m.GetParallel(timeout, level, true)
+}
+
+func (m *WriteManager) GetParallel(timeout <-chan struct{}, level int, exclusive bool) ([]*Writer, chan *Chunk) {
+	var writers []*Writer
+
+	// try to get n writers
+	for n := 0; n < level; n++ {
+		var wr *Writer
+		if exclusive {
+			wr, _ = m.GetExclusive(timeout)
+		} else {
+			wr, _ = m.GetShared(timeout)
+		}
+		if wr == nil {
+			goto cleanup
+		}
+
+		writers = append(writers, wr)
+	}
+
+	return writers, m.agg
+
+cleanup:
+	// release any writers we allocated
+	for _, wr := range writers {
+		m.Release(wr)
+	}
+
+	return nil, nil
 }
 
 // GetShared returns a shared writer or nil if timeout was closed before one
 // could be acquired.
-func (m *WriteManager) GetShared(timeout <-chan struct{}) *Writer {
+func (m *WriteManager) GetShared(timeout <-chan struct{}) (*Writer, chan *Chunk) {
 	var wr *Writer
 
 	select {
 	case <-m.exclusiveWaiter:
-		// don't grab a shared channel, wait for unused so the exclusive writer
-		// can get a chance.
+		// don't grab anything at the buffet, wait for for the exclusive writer
+		// to get a chance at the table and leave.
 		select {
 		case <-timeout:
-			return nil
+			return nil, nil
 		case wr = <-m.unused:
 		}
 	default:
 		// try either
 		select {
 		case <-timeout:
-			return nil
+			return nil, nil
 		case wr = <-m.unused:
 		case wr = <-m.shared:
 		}
@@ -117,29 +154,25 @@ func (m *WriteManager) GetShared(timeout <-chan struct{}) *Writer {
 		}
 	}()
 
-	return wr
+	return wr, wr.in
 }
 
 // GetExclusive returns a writer or nil if timeout was closed before one could
 // be acquired.
-func (m *WriteManager) GetExclusive(timeout <-chan struct{}) *Writer {
+func (m *WriteManager) GetExclusive(timeout <-chan struct{}) (*Writer, chan *Chunk) {
 	// tell the communal hippies that we want the table for our selves and
 	// don't wanna starve!
 	go func() { m.exclusiveWaiter <- struct{}{} }()
 
 	select {
 	case <-timeout:
-		return nil
+		return nil, nil
 	case wr := <-m.unused:
 		// wait until released, then put back as unused
 		go func() { <-wr.released; m.unused <- wr }()
 
-		return wr
+		return wr, wr.in
 	}
-}
-
-func (wr *Writer) In() chan *Chunk {
-	return wr.in
 }
 
 func (m *WriteManager) Release(wr *Writer) {
@@ -149,6 +182,7 @@ func (m *WriteManager) Release(wr *Writer) {
 	wr.attached--
 
 	if wr.attached == 0 {
+		// release it (go back to unused)
 		wr.released <- struct{}{}
 	}
 }
@@ -160,7 +194,12 @@ func (wr *Writer) loop() {
 	var volumeGlobalChunkId int
 
 	// grab chunks from all streams
-	for cnk = range wr.in {
+	for {
+		select {
+		case cnk = <-wr.in:
+		case cnk = <-wr.agg:
+		}
+
 		volumeGlobalChunkId++
 
 		// generate filename
