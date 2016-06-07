@@ -3,29 +3,162 @@ package stream
 import (
 	"fmt"
 	"os"
+	"path"
+	"sync"
+
+	"github.com/bh107/tapr/mtx"
 )
 
-type Creatable interface {
-	Create(string) (*os.File, error)
-}
-
+// A writer takes chunks from a channel and writes them to a given location.
 type Writer struct {
-	handle      Creatable
-	in          chan *Chunk
-	terminating chan struct{}
+	root string
+	in   chan *Chunk
+	agg  chan *Chunk
 
-	chunkpool *ChunkPool
+	mu        sync.RWMutex
+	attached  int
+	exclusive bool
+
+	released chan struct{}
 }
 
-func NewWriter(handle Creatable) *Writer {
+type WriteManager struct {
+	root string
+
+	unused chan *Writer
+	shared chan *Writer
+
+	agg chan *Chunk
+
+	mu              sync.RWMutex
+	exclusiveQueued int
+}
+
+func NewWriteManager(root string, numWriters int) *WriteManager {
+	manager := &WriteManager{
+		root: root,
+
+		unused: make(chan *Writer),
+		shared: make(chan *Writer),
+
+		agg: make(chan *Chunk),
+	}
+
+	return manager
+}
+
+func (m *WriteManager) NewWriter(vol *mtx.Volume) {
 	wr := &Writer{
-		handle: handle,
-		in:     make(chan *Chunk),
+		root: path.Join(m.root, vol.Serial),
+
+		// in channel for direct/exclusive access
+		in: make(chan *Chunk),
+
+		// aggregate channel for parallel write
+		agg: m.agg,
 	}
 
 	go wr.loop()
 
+	// add as unused
+	go func() { m.unused <- wr }()
+}
+
+func (m *WriteManager) Get(timeout <-chan struct{}, exclusive bool) *Writer {
+	var wr *Writer
+
+	if exclusive {
+		wr = m.GetExclusive(timeout)
+	} else {
+		wr = m.GetShared(timeout)
+	}
+
+	if wr == nil {
+		return nil
+	}
+
+	wr.mu.Lock()
+	defer wr.mu.Unlock()
+
+	wr.attached++
+
 	return wr
+}
+
+// GetShared returns a shared writer or nil if timeout was closed before one
+// could be acquired.
+func (m *WriteManager) GetShared(timeout <-chan struct{}) *Writer {
+	var wr *Writer
+
+	m.mu.RLock()
+	if m.exclusiveQueued > 0 {
+		m.mu.RUnlock()
+		// don't wait on the shared channel, queue up for a fresh unused
+		// channel
+		select {
+		case <-timeout:
+			return nil
+		case wr = <-m.unused:
+		}
+	} else {
+		m.mu.RUnlock()
+		// try either
+		select {
+		case <-timeout:
+			return nil
+		case wr = <-m.unused:
+		case wr = <-m.shared:
+		}
+	}
+
+	// send it back to the shared channel if anyone wants one from it, or to
+	// the unused, if it is released before we have a chance to send it.
+	go func() {
+		select {
+		case <-wr.released:
+			m.unused <- wr
+		case m.shared <- wr:
+		}
+	}()
+
+	return wr
+}
+
+// GetExclusive returns a writer or nil if timeout was closed before one could
+// be acquired.
+func (m *WriteManager) GetExclusive(timeout <-chan struct{}) *Writer {
+	m.mu.Lock()
+	m.exclusiveQueued++
+	m.mu.Unlock()
+
+	select {
+	case <-timeout:
+		return nil
+	case wr := <-m.unused:
+		m.mu.Lock()
+		m.exclusiveQueued--
+		m.mu.Unlock()
+
+		// wait until released, then put back as unused
+		go func() { <-wr.released; m.unused <- wr }()
+
+		return wr
+	}
+}
+
+func (wr *Writer) In() chan *Chunk {
+	return wr.in
+}
+
+func (m *WriteManager) Release(wr *Writer) {
+	wr.mu.Lock()
+	defer wr.mu.Unlock()
+
+	wr.attached--
+
+	if wr.attached == 0 {
+		wr.released <- struct{}{}
+	}
 }
 
 func (wr *Writer) loop() {
@@ -44,7 +177,7 @@ func (wr *Writer) loop() {
 			cnk.id,
 		)
 
-		f, err := wr.handle.Create(fname)
+		f, err := os.Create(path.Join(wr.root, fname))
 		if err != nil {
 			break
 		}
@@ -60,16 +193,11 @@ func (wr *Writer) loop() {
 		// report success (no error)
 		cnk.upstream.errc <- nil
 
-		// reset and return chunk to pool
+		// reset and return chunk to stream chunk pool
 		cnk.reset()
-		wr.chunkpool.Put(cnk)
+		cnk.upstream.chunkpool.Put(cnk)
 	}
 
 	// report any possible error
 	cnk.upstream.errc <- err
-
-	// announce that we won't be receiving anymore values
-	close(wr.terminating)
-
-	return
 }

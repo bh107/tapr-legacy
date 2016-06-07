@@ -14,6 +14,7 @@ type Drive struct {
 	vol *mtx.Volume
 
 	wr *stream.Writer
+	rd *stream.Reader
 }
 
 func NewDrive(path string, devtype string, slot int, lib *Library) *Drive {

@@ -15,9 +15,27 @@ import (
 	"github.com/bh107/tapr/inventory"
 	"github.com/bh107/tapr/mtx"
 	"github.com/bh107/tapr/stream"
+	"github.com/bh107/tapr/stream/policy"
 
 	"github.com/boltdb/bolt"
 )
+
+type Library struct {
+	name   string
+	chgr   *changer.Changer
+	drives map[string][]*Drive
+}
+
+func NewLibrary(name string) *Library {
+	return &Library{
+		name:   name,
+		drives: make(map[string][]*Drive),
+	}
+}
+
+func (lib *Library) String() string {
+	return lib.name
+}
 
 type Server struct {
 	libraries map[string]*Library
@@ -25,6 +43,8 @@ type Server struct {
 
 	chunkdb *bolt.DB
 	inv     *inventory.DB
+
+	writeManager *stream.WriteManager
 }
 
 func initChunkStore(cfg *config.Config) (*bolt.DB, error) {
@@ -72,31 +92,48 @@ func New(cfg *config.Config, debug bool, audit bool, mock bool) (*Server, error)
 
 	srv.libraries = make(map[string]*Library)
 
+	var numWriters int
+
 	// initialize libraries
-	for _, cfgLib := range cfg.Libraries {
-		log.Printf("init: adding library:   \"%s\"", cfgLib.Name)
-		lib := NewLibrary(cfgLib.Name)
+	for _, libCfg := range cfg.Libraries {
+		log.Printf("init: adding library:   \"%s\"", libCfg.Name)
+		lib := NewLibrary(libCfg.Name)
 
-		for _, cfgChgr := range cfgLib.Changers {
-			log.Printf("init: + adding changer: %s", cfgChgr.Path)
-			lib.chgr = changer.New(cfgChgr.Path, mock)
+		for _, chgrCfg := range libCfg.Changers {
+			log.Printf("init: + adding changer: %s", chgrCfg.Path)
+			if mock {
+				lib.chgr = changer.Mock(chgrCfg.Path)
+			} else {
+				lib.chgr = changer.New(chgrCfg.Path)
+			}
 		}
 
-		for _, cfgDrv := range cfgLib.Drives {
-			log.Printf("init: + adding drive:   %s (%s)", cfgDrv.Path, cfgDrv.Type)
-			drv := NewDrive(cfgDrv.Path, cfgDrv.Type, cfgDrv.Slot, lib)
-			lib.drives[drv.devtype] = append(lib.drives[drv.devtype], drv)
+		for _, drvCfg := range libCfg.Drives {
+			log.Printf("init: + adding drive:   %s (%s)", drvCfg.Path, drvCfg.Type)
+			drv := NewDrive(drvCfg.Path, drvCfg.Type, drvCfg.Slot, lib)
+			lib.drives[drvCfg.Type] = append(lib.drives[drvCfg.Type], drv)
 		}
 
-		srv.libraries[cfgLib.Name] = lib
+		srv.libraries[libCfg.Name] = lib
 
 		if audit {
-			log.Printf("init: audit started for \"%s\" library", cfgLib.Name)
-			_, err := srv.Audit(context.Background(), cfgLib.Name)
+			log.Printf("init: audit started for \"%s\" library", libCfg.Name)
+			_, err := srv.Audit(context.Background(), libCfg.Name)
 			if err != nil {
 				return nil, err
 			}
-			log.Printf("init: audit finished for \"%s\" library", cfgLib.Name)
+			log.Printf("init: audit finished for \"%s\" library", libCfg.Name)
+		}
+
+		numWriters += len(lib.drives["write"])
+	}
+
+	srv.writeManager = stream.NewWriteManager(cfg.LTFS.Root, numWriters)
+	for _, lib := range srv.libraries {
+		for _, drv := range lib.drives["write"] {
+			if drv.vol != nil {
+				srv.writeManager.NewWriter(drv.vol)
+			}
 		}
 	}
 
@@ -255,20 +292,33 @@ func (srv *Server) Retrieve(wr io.Writer, name string) error {
 */
 
 // Store grabs an io.Reader, reads until EOF and stores the data on a tape.
-func (srv *Server) Store(archive string, rd io.Reader) error {
+func (srv *Server) Store(ctx context.Context, archive string, rd io.Reader) error {
 	log.Printf("store archive: %s", archive)
 
-	drv := srv.libraries["primary"].drives["write"][0]
+	var exclusive bool
+	var writer *stream.Writer
 
-	// get chunkwriter
-	stream := stream.New(drv.wr)
+	// see if there is a write policy associated
+	if pol, ok := policy.Unwrap(ctx); ok {
+		if pol.Exclusive {
+			exclusive = true
+		}
+	}
 
-	r := bufio.NewReader(rd)
+	writer = srv.writeManager.Get(ctx.Done(), exclusive)
+
+	if writer == nil {
+		return ctx.Err()
+	}
+
+	stream := stream.New(writer.In())
+
+	reader := bufio.NewReader(rd)
 
 	buf := make([]byte, 4096)
 
 	for {
-		n, err := r.Read(buf[:cap(buf)])
+		n, err := reader.Read(buf[:cap(buf)])
 		buf = buf[:n]
 		if n == 0 {
 			if err == nil {

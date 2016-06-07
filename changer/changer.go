@@ -14,13 +14,20 @@ type Changer struct {
 	mu sync.Mutex
 }
 
-func New(path string, mocked bool) *Changer {
+func New(path string) *Changer {
+	return newChanger(path, false)
+}
+
+func Mock(path string) *Changer {
+	return newChanger(path, true)
+}
+
+func newChanger(path string, mocked bool) *Changer {
 	if mocked {
 		return &Changer{
 			Changer: mtx.NewChanger(mock.New(path)),
 		}
 	}
-
 	return &Changer{
 		Changer: mtx.NewChanger(scsi.New(path)),
 	}

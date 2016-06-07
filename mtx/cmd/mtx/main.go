@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/kbj/mtx"
-	"github.com/kbj/mtx/mock"
+	"github.com/bh107/tapr/mtx"
+	"github.com/bh107/tapr/mtx/mock"
 )
 
 func main() {
-	mtx := mtx.NewChanger(mock.New(8, 32, 4, 16))
+	mtx := mtx.NewChanger(mock.New("/dev/mock"))
 
 	status, err := mtx.Do("status")
 	if err != nil {

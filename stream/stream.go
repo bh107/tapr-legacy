@@ -1,23 +1,30 @@
 package stream
 
-import "errors"
-
 type Stream struct {
 	archive    []byte
 	partial    *Chunk
 	cnkCounter int
 
-	writer *Writer
-
 	errc chan error
+
+	out chan *Chunk
+
+	chunkpool *ChunkPool
 }
 
-func New(wr *Writer) *Stream {
-	return &Stream{
-		writer: wr,
-
+func New(out chan *Chunk) *Stream {
+	stream := &Stream{
 		errc: make(chan error),
+		out:  out,
+
+		chunkpool: NewChunkPool(DefaultChunkSize),
 	}
+
+	return stream
+}
+
+func (s *Stream) AddWriter(wr *Writer) {
+
 }
 
 func (s *Stream) Add(p []byte) error {
@@ -38,7 +45,7 @@ func (s *Stream) Add(p []byte) error {
 				return err
 			}
 
-			s.partial = s.writer.chunkpool.Get()
+			s.partial = s.chunkpool.Get()
 
 			// load remaining bytes into next chunk
 			p = p[n:]
@@ -58,10 +65,6 @@ func (s *Stream) Close() error {
 func (s *Stream) Write(cnk *Chunk) error {
 	cnk.upstream = s
 
-	select {
-	case s.writer.in <- cnk:
-		return <-s.errc
-	case <-s.writer.terminating:
-		return errors.New("writer terminated unexpectedly")
-	}
+	s.out <- cnk
+	return <-s.errc
 }
