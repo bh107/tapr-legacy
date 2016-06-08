@@ -44,7 +44,7 @@ type Server struct {
 	chunkdb *bolt.DB
 	inv     *inventory.DB
 
-	writeManager *stream.WriteManager
+	writer *stream.Writer
 }
 
 func initChunkStore(cfg *config.Config) (*bolt.DB, error) {
@@ -126,15 +126,6 @@ func New(cfg *config.Config, debug bool, audit bool, mock bool) (*Server, error)
 		}
 
 		numWriters += len(lib.drives["write"])
-	}
-
-	srv.writeManager = stream.NewWriteManager(cfg.LTFS.Root, numWriters)
-	for _, lib := range srv.libraries {
-		for _, drv := range lib.drives["write"] {
-			if drv.vol != nil {
-				srv.writeManager.NewWriter(drv.vol)
-			}
-		}
 	}
 
 	return srv, nil
@@ -291,52 +282,38 @@ func (srv *Server) Retrieve(wr io.Writer, name string) error {
 }
 */
 
+type ErrShortWrite struct {
+	Written int
+}
+
+func (e ErrShortWrite) Error() string {
+	return fmt.Sprintf("short write. wrote %d bytes", e.Written)
+}
+
 // Store grabs an io.Reader, reads until EOF and stores the data on a tape.
 func (srv *Server) Store(ctx context.Context, archive string, rd io.Reader) error {
 	log.Printf("store archive: %s", archive)
 
-	var (
-		exclusive bool
-		parallel  bool
-		parlevel  int
-
-		writer  *stream.Writer
-		writers []*stream.Writer
-		writec  chan *stream.Chunk
-	)
+	pol := policy.DefaultPolicy
 
 	// see if there is a write policy associated
-	if pol, ok := policy.Unwrap(ctx); ok {
-		if pol.Exclusive {
-			exclusive = true
-		}
-
-		if pol.ParallelWrite.Level != 0 {
-			parallel = true
-			parlevel = pol.ParallelWrite.Level
-		}
+	if newpol, ok := policy.Unwrap(ctx); ok {
+		pol = newpol
 	}
 
-	if parallel {
-		writers, writec = srv.writeManager.GetParallel(ctx.Done(), parlevel, exclusive)
-	} else {
-		writer, writec = srv.writeManager.Get(ctx.Done(), exclusive)
-		writers = append(writers, writer)
-	}
+	// create new stream
+	stream := stream.New(pol)
 
-	if len(writers) == 0 {
-		return ctx.Err()
-	}
-
-	stream := stream.New(writec)
-
-	for _, wr := range writers {
-		stream.AddWriter(wr)
+	// attach the stream to the writing system
+	if err := srv.writer.Attach(ctx, stream); err != nil {
+		return err
 	}
 
 	reader := bufio.NewReader(rd)
 
 	buf := make([]byte, 4096)
+
+	var written, total int
 
 	for {
 		n, err := reader.Read(buf[:cap(buf)])
@@ -357,9 +334,11 @@ func (srv *Server) Store(ctx context.Context, archive string, rd io.Reader) erro
 			return err
 		}
 
-		if err := stream.Add(buf); err != nil {
-			return err
+		if written, err = stream.Write(buf); err != nil {
+			return ErrShortWrite{total + written}
 		}
+
+		total += len(buf)
 	}
 
 	if err := stream.Close(); err != nil {

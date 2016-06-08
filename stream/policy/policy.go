@@ -7,14 +7,12 @@ import (
 	"golang.org/x/net/context"
 )
 
+var DefaultPolicy = &Policy{}
+
 type Policy struct {
 	AcknowledgedWrite bool
-
-	ParallelWrite struct {
-		Level int
-	}
-
-	Exclusive bool
+	ParallelWrite     int
+	Exclusive         bool
 }
 
 func Construct(req *http.Request) (*Policy, error) {
@@ -32,7 +30,7 @@ func Construct(req *http.Request) (*Policy, error) {
 		return nil, err
 	}
 
-	pol.ParallelWrite.Level = n
+	pol.ParallelWrite = n
 
 	if v = req.Header.Get("Exclusive"); v == "yes" {
 		pol.Exclusive = true

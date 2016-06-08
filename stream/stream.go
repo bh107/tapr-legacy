@@ -1,23 +1,26 @@
 package stream
 
+import "github.com/bh107/tapr/stream/policy"
+
+// Stream represents a byte stream going to backend storage.
 type Stream struct {
 	archive    []byte
 	partial    *Chunk
 	cnkCounter int
+	pol        *policy.Policy
 
 	errc chan error
 
 	out chan *Chunk
 
 	chunkpool *ChunkPool
-
-	writers []*Writer
 }
 
-func New(out chan *Chunk) *Stream {
+// New creates a new byte stream.
+func New(pol *policy.Policy) *Stream {
 	stream := &Stream{
 		errc: make(chan error),
-		out:  out,
+		pol:  pol,
 
 		chunkpool: NewChunkPool(DefaultChunkSize),
 	}
@@ -25,11 +28,13 @@ func New(out chan *Chunk) *Stream {
 	return stream
 }
 
-func (s *Stream) AddWriter(wr *Writer) {
-	s.writers = append(s.writers, wr)
-}
+// Write writes bytes to the stream. Chunks are only flushed to backend storage
+// when they reach DefaultChunkSize.
+func (s *Stream) Write(p []byte) (n int, err error) {
+	if s.out == nil {
+		panic("s.out was nil")
+	}
 
-func (s *Stream) Add(p []byte) error {
 	// try to assemble a chunk
 	for {
 		if len(p) == 0 {
@@ -43,8 +48,8 @@ func (s *Stream) Add(p []byte) error {
 			s.partial.id = s.cnkCounter
 
 			// attempt to write chunk
-			if err := s.Write(s.partial); err != nil {
-				return err
+			if err := s.writeChunk(s.partial); err != nil {
+				return n, err
 			}
 
 			s.partial = s.chunkpool.Get()
@@ -57,14 +62,16 @@ func (s *Stream) Add(p []byte) error {
 		break
 	}
 
-	return nil
+	return len(p), nil
 }
 
+// Close closes the current stream and flushed the partial chunk to backend
+// storage.
 func (s *Stream) Close() error {
-	return s.Write(s.partial)
+	return s.writeChunk(s.partial)
 }
 
-func (s *Stream) Write(cnk *Chunk) error {
+func (s *Stream) writeChunk(cnk *Chunk) error {
 	cnk.upstream = s
 
 	s.out <- cnk

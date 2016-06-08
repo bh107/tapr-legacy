@@ -1,146 +1,89 @@
 package stream
 
 import (
-	"fmt"
-	"os"
-	"path"
-	"sync"
-
-	"github.com/bh107/tapr/mtx"
+	"github.com/bh107/tapr/stream/policy"
+	"golang.org/x/net/context"
 )
 
-// A writer takes chunks from a channel and writes them to a given location.
+// Mover abstracts shared (multi-plexed), exclusive and parallel access to
+// backend storage.
 type Writer struct {
 	root string
-	in   chan *Chunk
-	agg  chan *Chunk
 
-	mu       sync.RWMutex
-	attached int
-
-	released chan struct{}
-}
-
-type WriteManager struct {
-	root string
-
-	unused chan *Writer
-	shared chan *Writer
-
-	agg chan *Chunk
+	unused chan *Drive
+	shared chan *Drive
 
 	exclusiveWaiter chan struct{}
 }
 
-func NewWriteManager(root string, numWriters int) *WriteManager {
-	manager := &WriteManager{
+// NewWriter creates a new Writer, anchored at the file system denoted by root.
+func NewWriter(root string) *Writer {
+	return &Writer{
 		root: root,
 
-		unused: make(chan *Writer),
-		shared: make(chan *Writer),
-
-		agg: make(chan *Chunk),
+		unused: make(chan *Drive),
+		shared: make(chan *Drive),
 	}
-
-	return manager
 }
 
-func (m *WriteManager) NewWriter(vol *mtx.Volume) {
-	wr := &Writer{
-		root: path.Join(m.root, vol.Serial),
-
-		// in channel for direct/exclusive access
-		in: make(chan *Chunk),
-
-		// aggregate channel for parallel write
-		agg: m.agg,
+// Attach attaches a Stream to the Writer.
+func (wr *Writer) Attach(ctx context.Context, s *Stream) error {
+	drv, err := wr.Get(ctx, s.pol)
+	if err != nil {
+		return err
 	}
 
-	go wr.loop()
+	s.out = drv.vol.in
 
-	// add as unused
-	go func() { m.unused <- wr }()
+	return nil
 }
 
-func (m *WriteManager) Get(timeout <-chan struct{}, exclusive bool) (*Writer, chan *Chunk) {
-	var wr *Writer
+// Get returns a shared/exclusive writer or nil if operation is cancelled
+// before one could be acquired.
+func (wr *Writer) Get(ctx context.Context, pol *policy.Policy) (*Drive, error) {
+	var drv *Drive
+	var err error
 
-	if exclusive {
-		wr, _ = m.GetExclusive(timeout)
+	if pol.Exclusive {
+		drv, err = wr.GetExclusive(ctx)
 	} else {
-		wr, _ = m.GetShared(timeout)
+		drv, err = wr.GetShared(ctx)
 	}
 
-	if wr == nil {
-		return nil, nil
+	if err != nil {
+		return nil, err
 	}
 
-	wr.mu.Lock()
-	defer wr.mu.Unlock()
+	drv.ctrl <- func(drv *Drive) error {
+		drv.attached++
 
-	wr.attached++
-
-	return wr, wr.in
-}
-
-func (m *WriteManager) GetParallelShared(timeout <-chan struct{}, level int) ([]*Writer, chan *Chunk) {
-	return m.GetParallel(timeout, level, false)
-}
-
-func (m *WriteManager) GetParallelExclusive(timeout <-chan struct{}, level int) ([]*Writer, chan *Chunk) {
-	return m.GetParallel(timeout, level, true)
-}
-
-func (m *WriteManager) GetParallel(timeout <-chan struct{}, level int, exclusive bool) ([]*Writer, chan *Chunk) {
-	var writers []*Writer
-
-	// try to get n writers
-	for n := 0; n < level; n++ {
-		var wr *Writer
-		if exclusive {
-			wr, _ = m.GetExclusive(timeout)
-		} else {
-			wr, _ = m.GetShared(timeout)
-		}
-		if wr == nil {
-			goto cleanup
-		}
-
-		writers = append(writers, wr)
+		return nil
 	}
 
-	return writers, m.agg
-
-cleanup:
-	// release any writers we allocated
-	for _, wr := range writers {
-		m.Release(wr)
-	}
-
-	return nil, nil
+	return drv, nil
 }
 
-// GetShared returns a shared writer or nil if timeout was closed before one
-// could be acquired.
-func (m *WriteManager) GetShared(timeout <-chan struct{}) (*Writer, chan *Chunk) {
-	var wr *Writer
+// GetShared returns a shared writer or nil if operation is cancelled before
+// one could be acquired.
+func (wr *Writer) GetShared(ctx context.Context) (*Drive, error) {
+	var drv *Drive
 
 	select {
-	case <-m.exclusiveWaiter:
+	case <-wr.exclusiveWaiter:
 		// don't grab anything at the buffet, wait for for the exclusive writer
 		// to get a chance at the table and leave.
 		select {
-		case <-timeout:
-			return nil, nil
-		case wr = <-m.unused:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case drv = <-wr.unused:
 		}
 	default:
 		// try either
 		select {
-		case <-timeout:
-			return nil, nil
-		case wr = <-m.unused:
-		case wr = <-m.shared:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case drv = <-wr.unused:
+		case drv = <-wr.shared:
 		}
 	}
 
@@ -148,87 +91,45 @@ func (m *WriteManager) GetShared(timeout <-chan struct{}) (*Writer, chan *Chunk)
 	// the unused, if it is released before we have a chance to send it.
 	go func() {
 		select {
-		case <-wr.released:
-			m.unused <- wr
-		case m.shared <- wr:
+		case <-drv.released:
+			// return to unused channel
+			wr.unused <- drv
+		case wr.shared <- drv:
 		}
 	}()
 
-	return wr, wr.in
+	return drv, nil
 }
 
 // GetExclusive returns a writer or nil if timeout was closed before one could
 // be acquired.
-func (m *WriteManager) GetExclusive(timeout <-chan struct{}) (*Writer, chan *Chunk) {
+func (wr *Writer) GetExclusive(ctx context.Context) (*Drive, error) {
 	// tell the communal hippies that we want the table for our selves and
 	// don't wanna starve!
-	go func() { m.exclusiveWaiter <- struct{}{} }()
+	go func() { wr.exclusiveWaiter <- struct{}{} }()
 
 	select {
-	case <-timeout:
-		return nil, nil
-	case wr := <-m.unused:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case drv := <-wr.unused:
 		// wait until released, then put back as unused
-		go func() { <-wr.released; m.unused <- wr }()
+		go func() { <-drv.released; wr.unused <- drv }()
 
-		return wr, wr.in
+		return drv, nil
 	}
 }
 
-func (m *WriteManager) Release(wr *Writer) {
-	wr.mu.Lock()
-	defer wr.mu.Unlock()
+// Release returns the drive as unused if after release, no streams are
+// attached.
+func (wr *Writer) Release(drv *Drive) {
+	drv.ctrl <- func(drv *Drive) error {
+		drv.attached--
 
-	wr.attached--
+		if drv.attached == 0 {
+			// release it (go back to unused)
+			drv.released <- struct{}{}
+		}
 
-	if wr.attached == 0 {
-		// release it (go back to unused)
-		wr.released <- struct{}{}
+		return nil
 	}
-}
-
-func (wr *Writer) loop() {
-	var err error
-	var cnk *Chunk
-
-	var volumeGlobalChunkId int
-
-	// grab chunks from all streams
-	for {
-		select {
-		case cnk = <-wr.in:
-		case cnk = <-wr.agg:
-		}
-
-		volumeGlobalChunkId++
-
-		// generate filename
-		fname := fmt.Sprintf("%07d-%s.cnk%07d",
-			volumeGlobalChunkId, string(cnk.upstream.archive),
-			cnk.id,
-		)
-
-		f, err := os.Create(path.Join(wr.root, fname))
-		if err != nil {
-			break
-		}
-
-		if _, err = f.Write(cnk.buf); err != nil {
-			break
-		}
-
-		if err = f.Close(); err != nil {
-			break
-		}
-
-		// report success (no error)
-		cnk.upstream.errc <- nil
-
-		// reset and return chunk to stream chunk pool
-		cnk.reset()
-		cnk.upstream.chunkpool.Put(cnk)
-	}
-
-	// report any possible error
-	cnk.upstream.errc <- err
 }
