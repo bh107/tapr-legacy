@@ -4,7 +4,7 @@ endif
 REPOPATH = github.com/bh107/tapr
 
 build:
-	go build -ldflags "-X $(REPOPATH).Version=$(VERSION)" ./cmd/taprd
+	go build -v -ldflags "-X $(REPOPATH).Version=$(VERSION)" ./cmd/taprd
 
 run:
 	./taprd --version

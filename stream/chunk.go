@@ -46,6 +46,10 @@ func NewChunk(size int) *Chunk {
 	}
 }
 
+func (cnk *Chunk) Upstream() *Stream {
+	return cnk.upstream
+}
+
 func (cnk *Chunk) add(p []byte) (n int) {
 	free := cap(cnk.buf) - len(cnk.buf)
 	if len(p) > free {

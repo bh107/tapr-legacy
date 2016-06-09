@@ -1,135 +1,99 @@
 package stream
 
 import (
-	"github.com/bh107/tapr/stream/policy"
-	"golang.org/x/net/context"
+	"fmt"
+	"os"
+	"path"
+
+	"github.com/bh107/tapr/mtx"
 )
 
-// Mover abstracts shared (multi-plexed), exclusive and parallel access to
-// backend storage.
+type ErrIO struct {
+	Err   error
+	Chunk *Chunk
+}
+
+func (e ErrIO) Error() string {
+	return fmt.Sprintf("i/o error: %s", e.Err)
+}
+
+// Writer represents a writable media.
 type Writer struct {
-	root string
+	root      string
+	globalSeq int
 
-	unused chan *Drive
-	shared chan *Drive
+	media *mtx.Volume
 
-	exclusiveWaiter chan struct{}
+	in  chan *Chunk
+	agg chan *Chunk
+
+	errc chan error
 }
 
-// NewWriter creates a new Writer, anchored at the file system denoted by root.
-func NewWriter(root string) *Writer {
-	return &Writer{
-		root: root,
+// NewWriter returns a new Writer and starts the communicating process.
+func NewWriter(root string, media *mtx.Volume, agg chan *Chunk) *Writer {
+	wr := &Writer{
+		root: path.Join(root, media.Serial),
 
-		unused: make(chan *Drive),
-		shared: make(chan *Drive),
-	}
-}
+		// in channel for direct/exclusive access
+		in: make(chan *Chunk),
 
-// Attach attaches a Stream to the Writer.
-func (wr *Writer) Attach(ctx context.Context, s *Stream) error {
-	drv, err := wr.Get(ctx, s.pol)
-	if err != nil {
-		return err
+		// for parallel write
+		agg: agg,
 	}
 
-	s.out = drv.vol.in
+	go wr.run()
 
-	return nil
+	return wr
 }
 
-// Get returns a shared/exclusive writer or nil if operation is cancelled
-// before one could be acquired.
-func (wr *Writer) Get(ctx context.Context, pol *policy.Policy) (*Drive, error) {
-	var drv *Drive
+func (wr *Writer) Errc() chan error {
+	return wr.errc
+}
+
+func (wr *Writer) Ingress() (in, agg chan *Chunk) {
+	return wr.in, wr.agg
+}
+
+func (wr *Writer) run() {
 	var err error
+	var cnk *Chunk
 
-	if pol.Exclusive {
-		drv, err = wr.GetExclusive(ctx)
-	} else {
-		drv, err = wr.GetShared(ctx)
-	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	drv.ctrl <- func(drv *Drive) error {
-		drv.attached++
-
-		return nil
-	}
-
-	return drv, nil
-}
-
-// GetShared returns a shared writer or nil if operation is cancelled before
-// one could be acquired.
-func (wr *Writer) GetShared(ctx context.Context) (*Drive, error) {
-	var drv *Drive
-
-	select {
-	case <-wr.exclusiveWaiter:
-		// don't grab anything at the buffet, wait for for the exclusive writer
-		// to get a chance at the table and leave.
+	// Grab chunks from all streams
+	//
+	// If any error is detected, it is reported back to the drive process.
+	// Success goes directly to the stream/client process.
+	for {
 		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case drv = <-wr.unused:
+		case cnk = <-wr.in:
+		case cnk = <-wr.agg:
 		}
-	default:
-		// try either
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case drv = <-wr.unused:
-		case drv = <-wr.shared:
+
+		wr.globalSeq++
+
+		// generate filename
+		fname := fmt.Sprintf("%07d-%s.cnk%07d",
+			wr.globalSeq, string(cnk.upstream.archive),
+			cnk.id,
+		)
+
+		f, err := os.Create(path.Join(wr.root, fname))
+		if err != nil {
+			break
 		}
+
+		if _, err = f.Write(cnk.buf); err != nil {
+			break
+		}
+
+		if err = f.Close(); err != nil {
+			break
+		}
+
+		// report success (no error), bypassing drive
+		cnk.upstream.errc <- nil
 	}
 
-	// send it back to the shared channel if anyone wants one from it, or to
-	// the unused, if it is released before we have a chance to send it.
-	go func() {
-		select {
-		case <-drv.released:
-			// return to unused channel
-			wr.unused <- drv
-		case wr.shared <- drv:
-		}
-	}()
-
-	return drv, nil
-}
-
-// GetExclusive returns a writer or nil if timeout was closed before one could
-// be acquired.
-func (wr *Writer) GetExclusive(ctx context.Context) (*Drive, error) {
-	// tell the communal hippies that we want the table for our selves and
-	// don't wanna starve!
-	go func() { wr.exclusiveWaiter <- struct{}{} }()
-
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case drv := <-wr.unused:
-		// wait until released, then put back as unused
-		go func() { <-drv.released; wr.unused <- drv }()
-
-		return drv, nil
-	}
-}
-
-// Release returns the drive as unused if after release, no streams are
-// attached.
-func (wr *Writer) Release(drv *Drive) {
-	drv.ctrl <- func(drv *Drive) error {
-		drv.attached--
-
-		if drv.attached == 0 {
-			// release it (go back to unused)
-			drv.released <- struct{}{}
-		}
-
-		return nil
-	}
+	// report error to the drive process
+	wr.errc <- ErrIO{err, cnk}
 }

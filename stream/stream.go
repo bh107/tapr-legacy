@@ -1,11 +1,14 @@
 package stream
 
-import "github.com/bh107/tapr/stream/policy"
+import (
+	"github.com/bh107/tapr/stream/policy"
+	"golang.org/x/net/context"
+)
 
 // Stream represents a byte stream going to backend storage.
 type Stream struct {
 	archive    []byte
-	partial    *Chunk
+	tmp        *Chunk
 	cnkCounter int
 	pol        *policy.Policy
 
@@ -28,9 +31,25 @@ func New(pol *policy.Policy) *Stream {
 	return stream
 }
 
+func (s *Stream) Policy() *policy.Policy {
+	return s.pol
+}
+
+func (s *Stream) Errc() chan error {
+	return s.errc
+}
+
+func (s *Stream) Out() chan *Chunk {
+	return s.out
+}
+
+func (s *Stream) SetOut(ch chan *Chunk) {
+	s.out = ch
+}
+
 // Write writes bytes to the stream. Chunks are only flushed to backend storage
 // when they reach DefaultChunkSize.
-func (s *Stream) Write(p []byte) (n int, err error) {
+func (s *Stream) Write(ctx context.Context, p []byte) (n int, err error) {
 	if s.out == nil {
 		panic("s.out was nil")
 	}
@@ -41,18 +60,18 @@ func (s *Stream) Write(p []byte) (n int, err error) {
 			break
 		}
 
-		n := s.partial.add(p)
+		n := s.tmp.add(p)
 
 		if n != len(p) {
 			s.cnkCounter++
-			s.partial.id = s.cnkCounter
+			s.tmp.id = s.cnkCounter
 
 			// attempt to write chunk
-			if err := s.writeChunk(s.partial); err != nil {
+			if err := s.writeChunk(ctx, s.tmp); err != nil {
 				return n, err
 			}
 
-			s.partial = s.chunkpool.Get()
+			s.tmp = s.chunkpool.Get()
 
 			// load remaining bytes into next chunk
 			p = p[n:]
@@ -67,13 +86,27 @@ func (s *Stream) Write(p []byte) (n int, err error) {
 
 // Close closes the current stream and flushed the partial chunk to backend
 // storage.
-func (s *Stream) Close() error {
-	return s.writeChunk(s.partial)
+func (s *Stream) Close(ctx context.Context) error {
+	return s.writeChunk(ctx, s.tmp)
 }
 
-func (s *Stream) writeChunk(cnk *Chunk) error {
+func (s *Stream) writeChunk(ctx context.Context, cnk *Chunk) error {
 	cnk.upstream = s
 
 	s.out <- cnk
-	return <-s.errc
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-s.errc:
+		if err != nil {
+			return err
+		}
+	}
+
+	// reset and return chunk to stream chunk pool
+	cnk.reset()
+	cnk.upstream.chunkpool.Put(cnk)
+
+	return nil
 }
