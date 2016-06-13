@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"time"
 
 	"golang.org/x/net/context"
 
@@ -16,7 +17,6 @@ import (
 	"github.com/bh107/tapr/inventory"
 	"github.com/bh107/tapr/ltfs"
 	"github.com/bh107/tapr/mtx"
-	"github.com/bh107/tapr/stream"
 	"github.com/bh107/tapr/stream/policy"
 
 	"github.com/boltdb/bolt"
@@ -51,8 +51,6 @@ type Server struct {
 
 	chunkdb *bolt.DB
 	inv     *inventory.DB
-
-	root string
 
 	drives map[string]driveStruct
 
@@ -149,6 +147,26 @@ func New(cfg *config.Config, debug bool, audit bool, mock bool) (*Server, error)
 		}
 
 		numWriters += len(lib.drives["write"])
+
+		for _, drv := range lib.drives["write"] {
+			vol, err := srv.GetScratch(drv)
+			if err != nil {
+				panic(err)
+			}
+
+			mountpoint, err := drv.Mountpoint()
+			if err != nil {
+				panic(err)
+			}
+
+			drv.writer = NewWriter(mountpoint, vol, drv.in, nil)
+
+			go drv.Run()
+
+			go func(drv *Drive) {
+				srv.drives["write"].unused <- drv
+			}(drv)
+		}
 	}
 
 	return srv, nil
@@ -161,13 +179,18 @@ func (srv *Server) Volumes(libname string) ([]*mtx.Volume, error) {
 func (srv *Server) Load(dev *Drive, vol *mtx.Volume) error {
 	if dev.vol != nil {
 		if dev.vol.Serial == vol.Serial {
-			log.Printf("drive %s already loaded with %s", dev, vol)
+			log.Printf("load: drive %s already loaded with %s", dev, vol)
 			return nil
 		}
 	}
 
 	err := dev.lib.chgr.Use(func(tx *changer.Tx) error {
-		log.Printf("loading drive %s with volume %s from slot %d", dev, vol, vol.Home)
+		log.Printf("load: loading drive %s with volume %s from slot %d", dev, vol, vol.Home)
+
+		if srv.mocked {
+			time.Sleep(2 * time.Second)
+		}
+
 		var err error
 		err = tx.Load(vol.Home, dev.slot)
 		if err != nil {
@@ -192,12 +215,17 @@ func (srv *Server) Load(dev *Drive, vol *mtx.Volume) error {
 
 func (srv *Server) Unload(dev *Drive) error {
 	if dev.vol == nil {
-		log.Printf("drive %s already unloaded", dev)
+		log.Printf("unload: drive %s already unloaded", dev)
 		return nil
 	}
 
 	err := dev.lib.chgr.Use(func(tx *changer.Tx) error {
-		log.Printf("unloading drive %s, returning volume %s to slot %d", dev, dev.vol, dev.vol.Home)
+		log.Printf("unload: unloading drive %s, returning volume %s to slot %d", dev, dev.vol, dev.vol.Home)
+
+		if srv.mocked {
+			time.Sleep(2 * time.Second)
+		}
+
 		var err error
 		err = tx.Unload(dev.vol.Home, dev.slot)
 		if err != nil {
@@ -253,7 +281,7 @@ func (e ErrShortWrite) Error() string {
 
 // Store grabs an io.Reader, reads until EOF and stores the data on a tape.
 func (srv *Server) Store(ctx context.Context, archive string, rd io.Reader) error {
-	log.Printf("store archive: %s", archive)
+	log.Printf("store: store archive: %s", archive)
 
 	pol := policy.DefaultPolicy
 
@@ -263,7 +291,7 @@ func (srv *Server) Store(ctx context.Context, archive string, rd io.Reader) erro
 	}
 
 	// create new stream
-	stream := stream.New(pol)
+	stream := NewStream(archive, pol)
 
 	// attach the stream to the writing system
 	// include the setup-timeout
@@ -272,9 +300,13 @@ func (srv *Server) Store(ctx context.Context, archive string, rd io.Reader) erro
 		ctx, cancel = context.WithTimeout(ctx, pol.ExclusiveTimeout)
 	}
 
-	if err := srv.Attach(ctx, stream); err != nil {
+	// Get a drive
+	drv, err := srv.Get(ctx, pol)
+	if err != nil {
 		return err
 	}
+
+	drv.Attach(stream)
 
 	if cancel != nil {
 		cancel()
@@ -282,7 +314,7 @@ func (srv *Server) Store(ctx context.Context, archive string, rd io.Reader) erro
 
 	reader := bufio.NewReader(rd)
 
-	buf := make([]byte, 4096)
+	buf := make([]byte, 1024)
 
 	var written, total int
 
@@ -341,19 +373,6 @@ func (srv *Server) Create(archive string) error {
 	})
 }
 
-// Attach attaches a Stream to the Writer.
-func (srv *Server) Attach(ctx context.Context, s *stream.Stream) error {
-	drv, err := srv.Get(ctx, s.Policy())
-	if err != nil {
-		return err
-	}
-
-	in, _ := drv.writer.Ingress()
-	s.SetOut(in)
-
-	return nil
-}
-
 // Get returns a shared/exclusive writer or nil if operation is cancelled
 // before one could be acquired.
 func (srv *Server) Get(ctx context.Context, pol *policy.Policy) (*Drive, error) {
@@ -368,12 +387,6 @@ func (srv *Server) Get(ctx context.Context, pol *policy.Policy) (*Drive, error) 
 
 	if err != nil {
 		return nil, err
-	}
-
-	drv.ctrl <- func(drv *Drive) error {
-		drv.attached++
-
-		return nil
 	}
 
 	return drv, nil
@@ -394,12 +407,38 @@ func (srv *Server) GetShared(ctx context.Context) (*Drive, error) {
 		case drv = <-srv.drives["write"].unused:
 		}
 	default:
-		// try either
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case drv = <-srv.drives["write"].unused:
-		case drv = <-srv.drives["write"].shared:
+		// first, try on the unused chan. If that has nothing, set shared and
+		// try that too.
+		var shared chan *Drive
+		for {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case drv = <-srv.drives["write"].unused:
+				log.Printf("GetShared: got %v from unused", drv)
+			case drv = <-shared:
+				// check if the drive has been retracted
+				select {
+				case <-drv.retracted:
+					// restart waiting for release
+					go func(drv *Drive) {
+						<-drv.released
+						srv.drives["write"].unused <- drv
+					}(drv)
+
+					log.Printf("drive %v retracted from shared", drv)
+					continue
+				default:
+				}
+
+				log.Printf("GetShared: got %v from shared", drv)
+
+			default:
+				shared = srv.drives["write"].shared
+				continue
+			}
+
+			break
 		}
 	}
 
@@ -408,6 +447,7 @@ func (srv *Server) GetShared(ctx context.Context) (*Drive, error) {
 	go func() {
 		select {
 		case <-drv.released:
+			log.Printf("%v released: sending back to unused", drv)
 			// return to unused channel
 			srv.drives["write"].unused <- drv
 		case srv.drives["write"].shared <- drv:
@@ -420,6 +460,7 @@ func (srv *Server) GetShared(ctx context.Context) (*Drive, error) {
 // GetExclusive returns a writer or nil if timeout was closed before one could
 // be acquired.
 func (srv *Server) GetExclusive(ctx context.Context) (*Drive, error) {
+	log.Print("EXCLUSIVE")
 	// tell the communal hippies that we want the table for our selves and
 	// don't wanna starve!
 	go func() { srv.drives["write"].exclusiveWaiter <- struct{}{} }()
@@ -432,21 +473,6 @@ func (srv *Server) GetExclusive(ctx context.Context) (*Drive, error) {
 		go func() { <-drv.released; srv.drives["write"].unused <- drv }()
 
 		return drv, nil
-	}
-}
-
-// Release returns the drive as unused if after release, no streams are
-// attached.
-func (srv *Server) Release(drv *Drive) {
-	drv.ctrl <- func(drv *Drive) error {
-		drv.attached--
-
-		if drv.attached == 0 {
-			// release it (go back to unused)
-			drv.released <- struct{}{}
-		}
-
-		return nil
 	}
 }
 
@@ -471,7 +497,8 @@ func (srv *Server) GetScratch(drv *Drive) (*mtx.Volume, error) {
 		return nil, err
 	}
 
-	if err := os.Mkdir(mountpoint, os.ModePerm); err != nil {
+	log.Printf("GetScratch: new volume mounted at %s", mountpoint)
+	if err := os.MkdirAll(mountpoint, os.ModePerm); err != nil {
 		return nil, err
 	}
 

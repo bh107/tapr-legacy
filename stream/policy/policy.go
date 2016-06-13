@@ -26,13 +26,14 @@ func Construct(req *http.Request) (*Policy, error) {
 		pol.AcknowledgedWrite = true
 	}
 
-	v = req.Header.Get("Parallel-Write")
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return nil, err
-	}
+	if v = req.Header.Get("Parallel-Write"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, err
+		}
 
-	pol.ParallelWrite = n
+		pol.ParallelWrite = n
+	}
 
 	if v = req.Header.Get("Exclusive"); v == "yes" {
 		pol.Exclusive = true

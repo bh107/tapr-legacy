@@ -1,16 +1,19 @@
-package stream
+package server
 
 import (
+	"log"
+
 	"github.com/bh107/tapr/stream/policy"
 	"golang.org/x/net/context"
 )
 
 // Stream represents a byte stream going to backend storage.
 type Stream struct {
-	archive    []byte
+	archive    string
 	tmp        *Chunk
 	cnkCounter int
 	pol        *policy.Policy
+	drv        *Drive
 
 	errc chan error
 
@@ -20,15 +23,18 @@ type Stream struct {
 }
 
 // New creates a new byte stream.
-func New(pol *policy.Policy) *Stream {
-	stream := &Stream{
-		errc: make(chan error),
-		pol:  pol,
+func NewStream(name string, pol *policy.Policy) *Stream {
+	s := &Stream{
+		archive: name,
+		errc:    make(chan error),
+		pol:     pol,
 
 		chunkpool: NewChunkPool(DefaultChunkSize),
 	}
 
-	return stream
+	s.tmp = s.chunkpool.Get()
+
+	return s
 }
 
 func (s *Stream) Policy() *policy.Policy {
@@ -37,14 +43,6 @@ func (s *Stream) Policy() *policy.Policy {
 
 func (s *Stream) Errc() chan error {
 	return s.errc
-}
-
-func (s *Stream) Out() chan *Chunk {
-	return s.out
-}
-
-func (s *Stream) SetOut(ch chan *Chunk) {
-	s.out = ch
 }
 
 // Write writes bytes to the stream. Chunks are only flushed to backend storage
@@ -63,9 +61,6 @@ func (s *Stream) Write(ctx context.Context, p []byte) (n int, err error) {
 		n := s.tmp.add(p)
 
 		if n != len(p) {
-			s.cnkCounter++
-			s.tmp.id = s.cnkCounter
-
 			// attempt to write chunk
 			if err := s.writeChunk(ctx, s.tmp); err != nil {
 				return n, err
@@ -87,10 +82,20 @@ func (s *Stream) Write(ctx context.Context, p []byte) (n int, err error) {
 // Close closes the current stream and flushed the partial chunk to backend
 // storage.
 func (s *Stream) Close(ctx context.Context) error {
-	return s.writeChunk(ctx, s.tmp)
+	if err := s.writeChunk(ctx, s.tmp); err != nil {
+		return err
+	}
+
+	log.Printf("closing, releasing %v", s.drv)
+	s.drv.Release()
+
+	return nil
 }
 
 func (s *Stream) writeChunk(ctx context.Context, cnk *Chunk) error {
+	s.cnkCounter++
+	s.tmp.id = s.cnkCounter
+
 	cnk.upstream = s
 
 	s.out <- cnk
@@ -106,7 +111,7 @@ func (s *Stream) writeChunk(ctx context.Context, cnk *Chunk) error {
 
 	// reset and return chunk to stream chunk pool
 	cnk.reset()
-	cnk.upstream.chunkpool.Put(cnk)
+	s.chunkpool.Put(cnk)
 
 	return nil
 }

@@ -1,9 +1,11 @@
-package stream
+package server
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path"
+	"syscall"
 
 	"github.com/bh107/tapr/mtx"
 )
@@ -21,25 +23,28 @@ func (e ErrIO) Error() string {
 type Writer struct {
 	root      string
 	globalSeq int
+	total     int
+
+	errc chan error
 
 	media *mtx.Volume
 
 	in  chan *Chunk
 	agg chan *Chunk
-
-	errc chan error
 }
 
 // NewWriter returns a new Writer and starts the communicating process.
-func NewWriter(root string, media *mtx.Volume, agg chan *Chunk) *Writer {
+func NewWriter(root string, media *mtx.Volume, in chan *Chunk, agg chan *Chunk) *Writer {
 	wr := &Writer{
-		root: path.Join(root, media.Serial),
+		root: root,
 
 		// in channel for direct/exclusive access
-		in: make(chan *Chunk),
+		in: in,
 
 		// for parallel write
 		agg: agg,
+
+		errc: make(chan error),
 	}
 
 	go wr.run()
@@ -77,11 +82,19 @@ func (wr *Writer) run() {
 			cnk.id,
 		)
 
-		f, err := os.Create(path.Join(wr.root, fname))
+		wr.total += len(cnk.buf)
+		if wr.total > (1024 * 32) {
+			err = syscall.ENOSPC
+			break
+		}
+
+		var f *os.File
+		f, err = os.Create(path.Join(wr.root, fname))
 		if err != nil {
 			break
 		}
 
+		// write takes some time
 		if _, err = f.Write(cnk.buf); err != nil {
 			break
 		}
@@ -90,9 +103,13 @@ func (wr *Writer) run() {
 			break
 		}
 
+		log.Printf("writer: succesfully wrote %s to %v", fname, cnk.upstream.drv)
+
 		// report success (no error), bypassing drive
 		cnk.upstream.errc <- nil
 	}
+
+	log.Print(err)
 
 	// report error to the drive process
 	wr.errc <- ErrIO{err, cnk}

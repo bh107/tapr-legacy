@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 
@@ -18,7 +20,7 @@ var (
 	cfg     *config.Config
 
 	showVersion bool
-	debug       bool
+	flagDebug   bool
 	runAudit    bool
 	mock        bool
 )
@@ -41,7 +43,7 @@ func init() {
 		"version", "v", false, "print version info and exit",
 	)
 
-	rootCmd.PersistentFlags().BoolVarP(&debug,
+	rootCmd.PersistentFlags().BoolVarP(&flagDebug,
 		"debug", "D", false, "enable debug mode",
 	)
 
@@ -60,7 +62,7 @@ func initConfig() {
 		os.Exit(1)
 	}
 
-	if debug {
+	if flagDebug {
 		fmt.Println("[+] debug enabled")
 		log.SetFlags(log.Lshortfile | log.Ltime)
 	}
@@ -89,11 +91,15 @@ func initConfig() {
 }
 
 func run(cmd *cobra.Command, args []string) {
-	srv, err := server.New(cfg, debug, runAudit, mock)
+	srv, err := server.New(cfg, flagDebug, runAudit, mock)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+
+	go func() {
+		log.Println(http.ListenAndServe("localhost:6060", nil))
+	}()
 
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt)
