@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"syscall"
+	"time"
 
 	"github.com/bh107/tapr/mtx"
 )
@@ -95,6 +96,7 @@ func (wr *Writer) run() {
 		}
 
 		// write takes some time
+		time.Sleep(1 * time.Second)
 		if _, err = f.Write(cnk.buf); err != nil {
 			break
 		}

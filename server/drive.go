@@ -86,7 +86,7 @@ func (drv *Drive) Takeover(cnk *Chunk) {
 		// Send the chunk that wasn't written to the new drive.
 		// The drive will report back to the stream which
 		// will continue on the new drive.
-		drv.writer.in <- cnk
+		go func() { drv.writer.in <- cnk }()
 	}
 }
 
@@ -122,7 +122,8 @@ func (drv *Drive) Run() {
 				cnk := errIO.Chunk
 
 				if errIO.Err == syscall.ENOSPC {
-					// The volume is full.
+					log.Printf("%v: no more space!", drv)
+					// The volume is full, retract it from shared.
 					go func() { drv.retracted <- true }()
 
 					// Start two asynchronous operations. Try to offload the

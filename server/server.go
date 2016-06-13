@@ -187,6 +187,7 @@ func (srv *Server) Load(dev *Drive, vol *mtx.Volume) error {
 	err := dev.lib.chgr.Use(func(tx *changer.Tx) error {
 		log.Printf("load: loading drive %s with volume %s from slot %d", dev, vol, vol.Home)
 
+		// simulate loading time
 		if srv.mocked {
 			time.Sleep(2 * time.Second)
 		}
@@ -222,6 +223,7 @@ func (srv *Server) Unload(dev *Drive) error {
 	err := dev.lib.chgr.Use(func(tx *changer.Tx) error {
 		log.Printf("unload: unloading drive %s, returning volume %s to slot %d", dev, dev.vol, dev.vol.Home)
 
+		// simulate unloading time
 		if srv.mocked {
 			time.Sleep(2 * time.Second)
 		}
@@ -420,7 +422,7 @@ func (srv *Server) GetShared(ctx context.Context) (*Drive, error) {
 				// check if the drive has been retracted
 				select {
 				case <-drv.retracted:
-					// restart waiting for release
+					// restart release waiter
 					go func(drv *Drive) {
 						<-drv.released
 						srv.drives["write"].unused <- drv
@@ -432,7 +434,6 @@ func (srv *Server) GetShared(ctx context.Context) (*Drive, error) {
 				}
 
 				log.Printf("GetShared: got %v from shared", drv)
-
 			default:
 				shared = srv.drives["write"].shared
 				continue
