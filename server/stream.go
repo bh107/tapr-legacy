@@ -18,6 +18,7 @@ type Stream struct {
 	errc chan error
 
 	out chan *Chunk
+	agg chan *Chunk
 
 	chunkpool *ChunkPool
 }
@@ -86,8 +87,7 @@ func (s *Stream) Close(ctx context.Context) error {
 		return err
 	}
 
-	log.Printf("closing, releasing %v", s.drv)
-	s.drv.Release()
+	log.Printf("steam closing %v", s.drv)
 
 	return nil
 }

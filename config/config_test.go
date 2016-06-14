@@ -27,6 +27,7 @@ library "primary" {
         drive "/dev/st0" {
                 type = "write"
                 slot = 1
+				group = "parallel-write"
         }
 
         drive "/dev/st1" {
@@ -44,6 +45,7 @@ library "secondary" {
         drive "/dev/st2" {
                 type = "write"
                 slot = 1
+				group = "parallel-write"
         }
 
         drive "/dev/st3" {
@@ -67,8 +69,12 @@ func TestConfigParsing(t *testing.T) {
 					ChangerConfig{Path: "/dev/sg4", Type: "mtx"},
 				},
 				Drives: []DriveConfig{
-					DriveConfig{Path: "/dev/st0", Type: "write", Slot: 1},
-					DriveConfig{Path: "/dev/st1", Type: "read", Slot: 0},
+					DriveConfig{
+						Path: "/dev/st0", Type: "write",
+						Slot: 1, Group: "parallel-write",
+					},
+					DriveConfig{
+						Path: "/dev/st1", Type: "read", Slot: 0},
 				},
 			},
 			LibraryConfig{
@@ -77,7 +83,10 @@ func TestConfigParsing(t *testing.T) {
 					ChangerConfig{Path: "/dev/sg7", Type: "mtx"},
 				},
 				Drives: []DriveConfig{
-					DriveConfig{Path: "/dev/st2", Type: "write", Slot: 1},
+					DriveConfig{
+						Path: "/dev/st2", Type: "write",
+						Slot: 1, Group: "parallel-write",
+					},
 					DriveConfig{Path: "/dev/st3", Type: "read", Slot: 0},
 				},
 			},

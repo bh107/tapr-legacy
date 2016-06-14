@@ -39,20 +39,27 @@ func (lib *Library) String() string {
 	return lib.name
 }
 
-type driveStruct struct {
+type iodev struct {
 	unused          chan *Drive
 	shared          chan *Drive
 	exclusiveWaiter chan struct{}
 }
 
+type driveGroup struct {
+	drives []*Drive
+	in     chan *Chunk
+}
+
 type Server struct {
 	libraries map[string]*Library
+	drives    map[string][]*Drive
 	cfg       *config.Config
 
 	chunkdb *bolt.DB
 	inv     *inventory.DB
 
-	drives map[string]driveStruct
+	iodevs map[string]iodev
+	groups map[string]driveGroup
 
 	mocked bool
 }
@@ -105,15 +112,16 @@ func New(cfg *config.Config, debug bool, audit bool, mock bool) (*Server, error)
 	}
 
 	srv.libraries = make(map[string]*Library)
-	srv.drives = make(map[string]driveStruct)
+	srv.drives = make(map[string][]*Drive)
+	srv.iodevs = make(map[string]iodev)
+	srv.groups = make(map[string]driveGroup)
+
 	for _, d := range []string{"read", "write"} {
-		srv.drives[d] = driveStruct{
+		srv.iodevs[d] = iodev{
 			unused: make(chan *Drive),
 			shared: make(chan *Drive),
 		}
 	}
-
-	var numWriters int
 
 	// initialize libraries
 	for _, libCfg := range cfg.Libraries {
@@ -132,7 +140,22 @@ func New(cfg *config.Config, debug bool, audit bool, mock bool) (*Server, error)
 		for _, drvCfg := range libCfg.Drives {
 			log.Printf("init: + adding drive:   %s (%s)", drvCfg.Path, drvCfg.Type)
 			drv := srv.NewDrive(drvCfg.Path, drvCfg.Type, drvCfg.Slot, lib)
-			lib.drives[drvCfg.Type] = append(lib.drives[drvCfg.Type], drv)
+			lib.drives[drvCfg.Path] = append(lib.drives[drvCfg.Path], drv)
+			srv.drives[drvCfg.Type] = append(srv.drives[drvCfg.Type], drv)
+
+			if drvCfg.Group != "" {
+				var grp driveGroup
+				if grp, ok := srv.groups[drvCfg.Group]; !ok {
+					log.Printf("init: + adding group: %s", drvCfg.Group)
+					grp = driveGroup{in: make(chan *Chunk)}
+					srv.groups[drvCfg.Group] = grp
+				}
+
+				drv.group = drvCfg.Group
+
+				log.Printf("init: + adding %s to %s group", drv, drvCfg.Group)
+				grp.drives = append(grp.drives, drv)
+			}
 		}
 
 		srv.libraries[libCfg.Name] = lib
@@ -146,27 +169,31 @@ func New(cfg *config.Config, debug bool, audit bool, mock bool) (*Server, error)
 			log.Printf("init: audit finished for \"%s\" library", libCfg.Name)
 		}
 
-		numWriters += len(lib.drives["write"])
+	}
 
-		for _, drv := range lib.drives["write"] {
-			vol, err := srv.GetScratch(drv)
-			if err != nil {
-				panic(err)
-			}
-
-			mountpoint, err := drv.Mountpoint()
-			if err != nil {
-				panic(err)
-			}
-
-			drv.writer = NewWriter(mountpoint, vol, drv.in, nil)
-
-			go drv.Run()
-
-			go func(drv *Drive) {
-				srv.drives["write"].unused <- drv
-			}(drv)
+	for _, drv := range srv.drives["write"] {
+		vol, err := srv.GetScratch(drv)
+		if err != nil {
+			panic(err)
 		}
+
+		mountpoint, err := drv.Mountpoint()
+		if err != nil {
+			panic(err)
+		}
+
+		var agg chan *Chunk
+		if drv.group != "" {
+			agg = srv.groups[drv.group].in
+		}
+
+		drv.writer = NewWriter(mountpoint, vol, drv.in, agg)
+
+		go drv.Run()
+
+		go func(drv *Drive) {
+			srv.iodevs["write"].shared <- drv
+		}(drv)
 	}
 
 	return srv, nil
@@ -295,8 +322,7 @@ func (srv *Server) Store(ctx context.Context, archive string, rd io.Reader) erro
 	// create new stream
 	stream := NewStream(archive, pol)
 
-	// attach the stream to the writing system
-	// include the setup-timeout
+	// create a context with setup timeout if necessary
 	var cancel context.CancelFunc
 	if pol.ExclusiveTimeout != 0 {
 		ctx, cancel = context.WithTimeout(ctx, pol.ExclusiveTimeout)
@@ -400,60 +426,15 @@ func (srv *Server) GetShared(ctx context.Context) (*Drive, error) {
 	var drv *Drive
 
 	select {
-	case <-srv.drives["write"].exclusiveWaiter:
-		// don't grab anything at the buffet, wait for for the exclusive writer
-		// to get a chance at the table and leave.
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case drv = <-srv.drives["write"].unused:
-		}
-	default:
-		// first, try on the unused chan. If that has nothing, set shared and
-		// try that too.
-		var shared chan *Drive
-		for {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case drv = <-srv.drives["write"].unused:
-				log.Printf("GetShared: got %v from unused", drv)
-			case drv = <-shared:
-				// check if the drive has been retracted
-				select {
-				case <-drv.retracted:
-					// restart release waiter
-					go func(drv *Drive) {
-						<-drv.released
-						srv.drives["write"].unused <- drv
-					}(drv)
-
-					log.Printf("drive %v retracted from shared", drv)
-					continue
-				default:
-				}
-
-				log.Printf("GetShared: got %v from shared", drv)
-			default:
-				shared = srv.drives["write"].shared
-				continue
-			}
-
-			break
-		}
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case drv = <-srv.iodevs["write"].shared:
+		log.Printf("GetShared: got %v from shared", drv)
 	}
 
 	// send it back to the shared channel if anyone wants one from it, or to
 	// the unused, if it is released before we have a chance to send it.
-	go func() {
-		select {
-		case <-drv.released:
-			log.Printf("%v released: sending back to unused", drv)
-			// return to unused channel
-			srv.drives["write"].unused <- drv
-		case srv.drives["write"].shared <- drv:
-		}
-	}()
+	go func() { srv.iodevs["write"].shared <- drv }()
 
 	return drv, nil
 }
@@ -464,14 +445,14 @@ func (srv *Server) GetExclusive(ctx context.Context) (*Drive, error) {
 	log.Print("EXCLUSIVE")
 	// tell the communal hippies that we want the table for our selves and
 	// don't wanna starve!
-	go func() { srv.drives["write"].exclusiveWaiter <- struct{}{} }()
+	go func() { srv.iodevs["write"].exclusiveWaiter <- struct{}{} }()
 
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
-	case drv := <-srv.drives["write"].unused:
+	case drv := <-srv.iodevs["write"].unused:
 		// wait until released, then put back as unused
-		go func() { <-drv.released; srv.drives["write"].unused <- drv }()
+		go func() { <-drv.released; srv.iodevs["write"].unused <- drv }()
 
 		return drv, nil
 	}

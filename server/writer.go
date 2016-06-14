@@ -6,7 +6,6 @@ import (
 	"os"
 	"path"
 	"syscall"
-	"time"
 
 	"github.com/bh107/tapr/mtx"
 )
@@ -53,10 +52,6 @@ func NewWriter(root string, media *mtx.Volume, in chan *Chunk, agg chan *Chunk) 
 	return wr
 }
 
-func (wr *Writer) Errc() chan error {
-	return wr.errc
-}
-
 func (wr *Writer) Ingress() (in, agg chan *Chunk) {
 	return wr.in, wr.agg
 }
@@ -84,7 +79,7 @@ func (wr *Writer) run() {
 		)
 
 		wr.total += len(cnk.buf)
-		if wr.total > (1024 * 32) {
+		if wr.total > (1024 * 128) {
 			err = syscall.ENOSPC
 			break
 		}
@@ -96,7 +91,7 @@ func (wr *Writer) run() {
 		}
 
 		// write takes some time
-		time.Sleep(1 * time.Second)
+		//time.Sleep(1 * time.Second)
 		if _, err = f.Write(cnk.buf); err != nil {
 			break
 		}

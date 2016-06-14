@@ -14,23 +14,19 @@ import (
 type DriveRequest func()
 
 type Drive struct {
-	// buffer chunk
-	//chunk *Chunk
-
 	writer *Writer
 
-	ctrl      chan DriveRequest
-	released  chan struct{}
-	in        chan *Chunk
-	retracted chan bool
+	ctrl     chan DriveRequest
+	released chan struct{}
+	in       chan *Chunk
 
-	attached int
-	handoff  bool
+	handoff bool
 
 	path    string
 	devtype string
 	slot    int
 	lib     *Library
+	group   string
 
 	vol *mtx.Volume
 
@@ -44,10 +40,9 @@ func (srv *Server) NewDrive(path string, devtype string, slot int, lib *Library)
 		slot:    slot,
 		lib:     lib,
 
-		ctrl:      make(chan DriveRequest),
-		released:  make(chan struct{}),
-		in:        make(chan *Chunk),
-		retracted: make(chan bool),
+		ctrl:     make(chan DriveRequest),
+		released: make(chan struct{}),
+		in:       make(chan *Chunk),
 
 		srv: srv,
 	}
@@ -60,15 +55,13 @@ func (drv *Drive) String() string {
 }
 
 func (drv *Drive) Attach(s *Stream) {
-	rep := make(chan error)
+	rep := make(chan struct{})
 
 	drv.ctrl <- func() {
-		drv.attached++
-
 		s.out = drv.in
 		s.drv = drv
 
-		rep <- nil
+		close(rep)
 	}
 
 	<-rep
@@ -78,7 +71,6 @@ func (drv *Drive) Attach(s *Stream) {
 func (drv *Drive) Takeover(cnk *Chunk) {
 	drv.ctrl <- func() {
 		log.Printf("drive %v: taking over stream", drv)
-		drv.attached++
 
 		cnk.upstream.out = drv.in
 		cnk.upstream.drv = drv
@@ -98,33 +90,17 @@ func (drv *Drive) Mountpoint() (string, error) {
 	return path.Join(drv.srv.cfg.LTFS.Root, drv.devtype, drv.vol.Serial), nil
 }
 
-// Release returns the drive as unused if after release, no streams are
-// attached.
-func (drv *Drive) Release() {
-	drv.ctrl <- func() {
-		drv.attached--
-
-		if drv.attached == 0 {
-			// release it (go back to unused)
-			go func() { drv.released <- struct{}{}; log.Printf("%v: RELEASED", drv) }()
-		}
-	}
-}
-
 func (drv *Drive) Run() {
 	for {
-		log.Printf("drive: %v selecting", drv)
 		select {
-		case err := <-drv.writer.Errc():
+		case err := <-drv.writer.errc:
 			// if err was nil, it was a normal exit, mount a new volume and
 			// mark as filled.
 			if errIO, ok := err.(ErrIO); ok {
 				cnk := errIO.Chunk
 
 				if errIO.Err == syscall.ENOSPC {
-					log.Printf("%v: no more space!", drv)
-					// The volume is full, retract it from shared.
-					go func() { drv.retracted <- true }()
+					// The volume is full
 
 					// Start two asynchronous operations. Try to offload the
 					// stream to another drive (either exclusive or shared, it
@@ -137,13 +113,14 @@ func (drv *Drive) Run() {
 					// Start the request for another drive
 					getNewDrive := make(chan *Drive)
 					go func(pol *policy.Policy) {
+						defer cancelGet()
+
 						newdrv, err := drv.srv.Get(ctx, pol)
 						if err != nil {
 							log.Print(err)
 							return
 						}
 
-						cancelGet()
 						getNewDrive <- newdrv
 					}(cnk.upstream.pol)
 
@@ -167,37 +144,29 @@ func (drv *Drive) Run() {
 						getNewWriter <- NewWriter(mountpoint, vol, drv.in, nil)
 					}()
 
+					var handedoff bool
 					for {
 						select {
 						case newdrv := <-getNewDrive:
 							if newdrv != nil {
-								drv.handoff = true
-								// stream no longer attached to this drive
-								drv.attached--
-								newdrv.Takeover(cnk)
+								// hand off stream
+								go newdrv.Takeover(cnk)
+								handedoff = true
 							}
 
 							// wait for mount
 							continue
 						case newwr := <-getNewWriter:
-							// cancel the GetDrive request and break the loop.
+							// cancel the GetDrive request
 							cancelGet()
 
 							// update our writer
 							drv.writer = newwr
 
-							if drv.handoff {
-								drv.handoff = false
-							} else {
-								drv.writer.in <- cnk
-							}
-
-							// if there isn't anything else attached here, release it
-							if drv.attached == 0 {
-								log.Printf("%v: releasing because there are noone attached", drv)
-								go func(drv *Drive) {
-									drv.released <- struct{}{}
-								}(drv)
+							// if this chunk's stream wasn't offloaded to
+							// another drive, send the chunk to the new writer.
+							if !handedoff {
+								go func() { drv.in <- cnk }()
 							}
 						}
 
@@ -212,7 +181,6 @@ func (drv *Drive) Run() {
 				log.Printf("%v: ERROR: %s", drv, err)
 			}
 		case req := <-drv.ctrl:
-			log.Printf("%v: got request", drv)
 			req()
 		}
 	}

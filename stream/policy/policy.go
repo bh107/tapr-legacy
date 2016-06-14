@@ -2,7 +2,6 @@ package policy
 
 import (
 	"net/http"
-	"strconv"
 	"time"
 
 	"golang.org/x/net/context"
@@ -12,7 +11,7 @@ var DefaultPolicy = &Policy{}
 
 type Policy struct {
 	AcknowledgedWrite bool
-	ParallelWrite     int
+	WriteGroup        string
 	Exclusive         bool
 	ExclusiveTimeout  time.Duration
 }
@@ -26,14 +25,7 @@ func Construct(req *http.Request) (*Policy, error) {
 		pol.AcknowledgedWrite = true
 	}
 
-	if v = req.Header.Get("Parallel-Write"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			return nil, err
-		}
-
-		pol.ParallelWrite = n
-	}
+	pol.WriteGroup = req.Header.Get("Write-Group")
 
 	if v = req.Header.Get("Exclusive"); v == "yes" {
 		pol.Exclusive = true

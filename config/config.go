@@ -25,9 +25,10 @@ type LTFSConfig struct {
 }
 
 type DriveConfig struct {
-	Path string `hcl:",key"`
-	Type string `hcl:"type"`
-	Slot int    `hcl:"slot"`
+	Path  string `hcl:",key"`
+	Type  string `hcl:"type"`
+	Slot  int    `hcl:"slot"`
+	Group string `hcl:"group"`
 }
 
 type ChangerConfig struct {
