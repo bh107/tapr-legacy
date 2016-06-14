@@ -1,17 +1,15 @@
 package server
 
 import (
-	"errors"
+	"fmt"
 	"log"
 	"path"
 	"syscall"
 
 	"github.com/bh107/tapr/mtx"
-	"github.com/bh107/tapr/stream/policy"
+	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 )
-
-type DriveRequest func()
 
 type Drive struct {
 	writer *Writer
@@ -26,7 +24,7 @@ type Drive struct {
 	devtype string
 	slot    int
 	lib     *Library
-	group   string
+	group   *driveGroup
 
 	vol *mtx.Volume
 
@@ -54,32 +52,47 @@ func (drv *Drive) String() string {
 	return drv.path
 }
 
-func (drv *Drive) Attach(s *Stream) {
-	rep := make(chan struct{})
+type DriveRequest interface {
+	fmt.Stringer
 
-	drv.ctrl <- func() {
-		s.out = drv.in
-		s.drv = drv
-
-		close(rep)
-	}
-
-	<-rep
-	log.Printf("drive: stream attached to %v", drv)
+	Execute(*Drive) error
 }
 
-func (drv *Drive) Takeover(cnk *Chunk) {
-	drv.ctrl <- func() {
-		log.Printf("drive %v: taking over stream", drv)
+type Takeover struct {
+	Cnk  *Chunk
+	From *Drive
+}
 
+func (req Takeover) String() string {
+	return fmt.Sprintf("takeover %v from %v", req.Cnk.upstream, req.From)
+}
+
+func (req Takeover) Execute(drv *Drive) error {
+	cnk := req.Cnk
+
+	// do not update the out channel if the stream is parallel
+	if !cnk.upstream.Parallel() {
 		cnk.upstream.out = drv.in
-		cnk.upstream.drv = drv
-
-		// Send the chunk that wasn't written to the new drive.
-		// The drive will report back to the stream which
-		// will continue on the new drive.
-		go func() { drv.writer.in <- cnk }()
 	}
+
+	// Send the chunk that wasn't written to the new drive.
+	// The drive will report back to the stream which
+	// will continue on the new drive.
+	go func() { drv.writer.in <- cnk }()
+
+	return nil
+}
+
+func (drv *Drive) Ctrl(req DriveRequest) {
+	drv.ctrl <- req
+}
+
+func (drv *Drive) Agg() chan *Chunk {
+	if drv.group != nil {
+		return drv.group.in
+	}
+
+	return nil
 }
 
 func (drv *Drive) Mountpoint() (string, error) {
@@ -94,8 +107,6 @@ func (drv *Drive) Run() {
 	for {
 		select {
 		case err := <-drv.writer.errc:
-			// if err was nil, it was a normal exit, mount a new volume and
-			// mark as filled.
 			if errIO, ok := err.(ErrIO); ok {
 				cnk := errIO.Chunk
 
@@ -108,57 +119,57 @@ func (drv *Drive) Run() {
 					// a mount of a new volume.
 
 					// Get a cancellable context
-					ctx, cancelGet := context.WithCancel(context.Background())
+					ctx, cancel := context.WithCancel(context.Background())
 
 					// Start the request for another drive
-					getNewDrive := make(chan *Drive)
-					go func(pol *policy.Policy) {
-						defer cancelGet()
+					reqDrive := make(chan *Drive)
+					go func() {
+						defer cancel()
 
-						newdrv, err := drv.srv.Get(ctx, pol)
+						new, err := drv.srv.GetDrive(ctx, cnk.upstream.pol)
 						if err != nil {
 							log.Print(err)
 							return
 						}
 
-						getNewDrive <- newdrv
-					}(cnk.upstream.pol)
+						reqDrive <- new
+					}()
 
 					// No context needed, should not be cancelled in any case.
-					getNewWriter := make(chan *Writer)
+					reqWriter := make(chan *Writer)
 					go func() {
 						vol, err := drv.srv.GetScratch(drv)
 						if err != nil {
 							log.Print(err)
-							getNewWriter <- nil
+							reqWriter <- nil
 							return
 						}
 
 						mountpoint, err := drv.Mountpoint()
 						if err != nil {
 							log.Print(err)
-							getNewWriter <- nil
+							reqWriter <- nil
 							return
 						}
 
-						getNewWriter <- NewWriter(mountpoint, vol, drv.in, nil)
+						reqWriter <- NewWriter(mountpoint, vol, drv.in, drv.Agg(), drv)
 					}()
 
 					var handedoff bool
 					for {
 						select {
-						case newdrv := <-getNewDrive:
+						case newdrv := <-reqDrive:
 							if newdrv != nil {
 								// hand off stream
-								go newdrv.Takeover(cnk)
+								go newdrv.Ctrl(Takeover{cnk, drv})
 								handedoff = true
 							}
 
 							// wait for mount
 							continue
-						case newwr := <-getNewWriter:
+						case newwr := <-reqWriter:
 							// cancel the GetDrive request
-							cancelGet()
+							cancel()
 
 							// update our writer
 							drv.writer = newwr
@@ -175,13 +186,17 @@ func (drv *Drive) Run() {
 				} else {
 					// XXX other error, report to stream. Mark volume as
 					// suspicious and mount new one.
-					cnk.Upstream().Errc() <- errIO.Err
+					cnk.upstream.errc <- errIO.Err
 				}
 			} else {
 				log.Printf("%v: ERROR: %s", drv, err)
 			}
+
 		case req := <-drv.ctrl:
-			req()
+			log.Printf("%v ctrl request: %v", drv, req)
+			if err := req.Execute(drv); err != nil {
+				log.Print(err)
+			}
 		}
 	}
 }

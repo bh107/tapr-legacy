@@ -2,7 +2,6 @@ package server
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -18,6 +17,7 @@ import (
 	"github.com/bh107/tapr/ltfs"
 	"github.com/bh107/tapr/mtx"
 	"github.com/bh107/tapr/stream/policy"
+	"github.com/pkg/errors"
 
 	"github.com/boltdb/bolt"
 )
@@ -59,7 +59,7 @@ type Server struct {
 	inv     *inventory.DB
 
 	iodevs map[string]iodev
-	groups map[string]driveGroup
+	groups map[string]*driveGroup
 
 	mocked bool
 }
@@ -103,18 +103,18 @@ func New(cfg *config.Config, debug bool, audit bool, mock bool) (*Server, error)
 
 	srv.chunkdb, err = initChunkStore(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to initialize chunkstore: %s", err)
+		return nil, errors.Wrap(err, "failed to initialize chunkstore")
 	}
 
 	srv.inv, err = initInventory(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to initialize inventory: %s", err)
+		return nil, errors.Wrap(err, "failed to initialize inventory")
 	}
 
 	srv.libraries = make(map[string]*Library)
 	srv.drives = make(map[string][]*Drive)
 	srv.iodevs = make(map[string]iodev)
-	srv.groups = make(map[string]driveGroup)
+	srv.groups = make(map[string]*driveGroup)
 
 	for _, d := range []string{"read", "write"} {
 		srv.iodevs[d] = iodev{
@@ -144,14 +144,18 @@ func New(cfg *config.Config, debug bool, audit bool, mock bool) (*Server, error)
 			srv.drives[drvCfg.Type] = append(srv.drives[drvCfg.Type], drv)
 
 			if drvCfg.Group != "" {
-				var grp driveGroup
-				if grp, ok := srv.groups[drvCfg.Group]; !ok {
+				var grp *driveGroup
+				var ok bool
+				if grp, ok = srv.groups[drvCfg.Group]; !ok {
 					log.Printf("init: + adding group: %s", drvCfg.Group)
-					grp = driveGroup{in: make(chan *Chunk)}
+					grp = &driveGroup{
+						in:     make(chan *Chunk),
+						drives: make([]*Drive, 0),
+					}
 					srv.groups[drvCfg.Group] = grp
 				}
 
-				drv.group = drvCfg.Group
+				drv.group = grp
 
 				log.Printf("init: + adding %s to %s group", drv, drvCfg.Group)
 				grp.drives = append(grp.drives, drv)
@@ -183,11 +187,11 @@ func New(cfg *config.Config, debug bool, audit bool, mock bool) (*Server, error)
 		}
 
 		var agg chan *Chunk
-		if drv.group != "" {
-			agg = srv.groups[drv.group].in
+		if drv.group != nil {
+			agg = drv.group.in
 		}
 
-		drv.writer = NewWriter(mountpoint, vol, drv.in, agg)
+		drv.writer = NewWriter(mountpoint, vol, drv.in, agg, drv)
 
 		go drv.Run()
 
@@ -297,7 +301,7 @@ func (srv *Server) Audit(ctx context.Context, libname string) (*mtx.Status, erro
 		return status, nil
 	}
 
-	return nil, fmt.Errorf("unknown library: %s", libname)
+	return nil, errors.Errorf("unknown library: %s", libname)
 }
 
 type ErrShortWrite struct {
@@ -305,7 +309,7 @@ type ErrShortWrite struct {
 }
 
 func (e ErrShortWrite) Error() string {
-	return fmt.Sprintf("short write. wrote %d bytes", e.Written)
+	return fmt.Sprintf("short write: wrote %d bytes", e.Written)
 }
 
 // Store grabs an io.Reader, reads until EOF and stores the data on a tape.
@@ -328,13 +332,21 @@ func (srv *Server) Store(ctx context.Context, archive string, rd io.Reader) erro
 		ctx, cancel = context.WithTimeout(ctx, pol.ExclusiveTimeout)
 	}
 
-	// Get a drive
-	drv, err := srv.Get(ctx, pol)
-	if err != nil {
-		return err
-	}
+	if pol.Parallel() {
+		if grp, ok := srv.groups[pol.WriteGroup]; ok {
+			stream.out = grp.in
+		}
 
-	drv.Attach(stream)
+		return errors.New("no such write group")
+	} else {
+		// Get a drive
+		drv, err := srv.GetDrive(ctx, pol)
+		if err != nil {
+			return err
+		}
+
+		stream.out = drv.in
+	}
 
 	if cancel != nil {
 		cancel()
@@ -394,7 +406,7 @@ func (srv *Server) Create(archive string) error {
 	return srv.chunkdb.Update(func(tx *bolt.Tx) error {
 		_, err := tx.CreateBucket([]byte(archive))
 		if err != nil {
-			return fmt.Errorf("create bucket: %s", err)
+			return errors.Wrap(err, "create archive failed")
 		}
 
 		return nil
@@ -403,7 +415,7 @@ func (srv *Server) Create(archive string) error {
 
 // Get returns a shared/exclusive writer or nil if operation is cancelled
 // before one could be acquired.
-func (srv *Server) Get(ctx context.Context, pol *policy.Policy) (*Drive, error) {
+func (srv *Server) GetDrive(ctx context.Context, pol *policy.Policy) (*Drive, error) {
 	var drv *Drive
 	var err error
 
@@ -442,7 +454,6 @@ func (srv *Server) GetShared(ctx context.Context) (*Drive, error) {
 // GetExclusive returns a writer or nil if timeout was closed before one could
 // be acquired.
 func (srv *Server) GetExclusive(ctx context.Context) (*Drive, error) {
-	log.Print("EXCLUSIVE")
 	// tell the communal hippies that we want the table for our selves and
 	// don't wanna starve!
 	go func() { srv.iodevs["write"].exclusiveWaiter <- struct{}{} }()

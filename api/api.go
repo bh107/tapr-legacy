@@ -71,5 +71,5 @@ func Start(srv *server.Server) error {
 	router := NewRouter(srv)
 
 	log.Print("http-api: starting http server...")
-	return http.ListenAndServe(":8080", router)
+	return http.ListenAndServeTLS(":8080", "cert.pem", "key.pem", router)
 }

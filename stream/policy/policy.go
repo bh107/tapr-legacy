@@ -16,6 +16,10 @@ type Policy struct {
 	ExclusiveTimeout  time.Duration
 }
 
+func (pol *Policy) Parallel() bool {
+	return pol.WriteGroup != ""
+}
+
 func Construct(req *http.Request) (*Policy, error) {
 	pol := &Policy{}
 

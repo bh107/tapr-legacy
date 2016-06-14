@@ -12,11 +12,10 @@ func logger(h http.Handler, name string) http.Handler {
 
 		h.ServeHTTP(w, r)
 
-		log.Printf(
-			"%s\t%s\t%s\t%s",
+		log.Printf("api[%s]: %s %s    %s",
+			name,
 			r.Method,
 			r.RequestURI,
-			name,
 			time.Since(start),
 		)
 	})

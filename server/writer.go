@@ -28,32 +28,29 @@ type Writer struct {
 	errc chan error
 
 	media *mtx.Volume
+	drv   *Drive
 
 	in  chan *Chunk
 	agg chan *Chunk
 }
 
 // NewWriter returns a new Writer and starts the communicating process.
-func NewWriter(root string, media *mtx.Volume, in chan *Chunk, agg chan *Chunk) *Writer {
+func NewWriter(root string, media *mtx.Volume, in chan *Chunk, agg chan *Chunk, drv *Drive) *Writer {
 	wr := &Writer{
 		root: root,
 
 		// in channel for direct/exclusive access
-		in: in,
-
-		// for parallel write
+		in:  in,
 		agg: agg,
 
 		errc: make(chan error),
+
+		drv: drv,
 	}
 
 	go wr.run()
 
 	return wr
-}
-
-func (wr *Writer) Ingress() (in, agg chan *Chunk) {
-	return wr.in, wr.agg
 }
 
 func (wr *Writer) run() {
@@ -79,35 +76,33 @@ func (wr *Writer) run() {
 		)
 
 		wr.total += len(cnk.buf)
-		if wr.total > (1024 * 128) {
-			err = syscall.ENOSPC
+		if wr.total > (1024 * 64) {
+			wr.errc <- ErrIO{syscall.ENOSPC, cnk}
 			break
 		}
 
 		var f *os.File
 		f, err = os.Create(path.Join(wr.root, fname))
 		if err != nil {
+			wr.errc <- ErrIO{err, cnk}
 			break
 		}
 
 		// write takes some time
 		//time.Sleep(1 * time.Second)
 		if _, err = f.Write(cnk.buf); err != nil {
+			wr.errc <- ErrIO{err, cnk}
 			break
 		}
 
 		if err = f.Close(); err != nil {
+			wr.errc <- ErrIO{err, cnk}
 			break
 		}
 
-		log.Printf("writer: succesfully wrote %s to %v", fname, cnk.upstream.drv)
+		log.Printf("writer[%v]: succesfully wrote %s", wr.drv, fname)
 
 		// report success (no error), bypassing drive
 		cnk.upstream.errc <- nil
 	}
-
-	log.Print(err)
-
-	// report error to the drive process
-	wr.errc <- ErrIO{err, cnk}
 }

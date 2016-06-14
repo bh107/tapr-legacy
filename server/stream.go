@@ -13,12 +13,10 @@ type Stream struct {
 	tmp        *Chunk
 	cnkCounter int
 	pol        *policy.Policy
-	drv        *Drive
 
 	errc chan error
 
 	out chan *Chunk
-	agg chan *Chunk
 
 	chunkpool *ChunkPool
 }
@@ -38,21 +36,17 @@ func NewStream(name string, pol *policy.Policy) *Stream {
 	return s
 }
 
-func (s *Stream) Policy() *policy.Policy {
-	return s.pol
+func (s *Stream) String() string {
+	return s.archive
 }
 
-func (s *Stream) Errc() chan error {
-	return s.errc
+func (s *Stream) Parallel() bool {
+	return s.pol.WriteGroup != ""
 }
 
 // Write writes bytes to the stream. Chunks are only flushed to backend storage
 // when they reach DefaultChunkSize.
 func (s *Stream) Write(ctx context.Context, p []byte) (n int, err error) {
-	if s.out == nil {
-		panic("s.out was nil")
-	}
-
 	// try to assemble a chunk
 	for {
 		if len(p) == 0 {
@@ -87,7 +81,7 @@ func (s *Stream) Close(ctx context.Context) error {
 		return err
 	}
 
-	log.Printf("steam closing %v", s.drv)
+	log.Print("steam closing")
 
 	return nil
 }
@@ -98,6 +92,7 @@ func (s *Stream) writeChunk(ctx context.Context, cnk *Chunk) error {
 
 	cnk.upstream = s
 
+	// send chunk
 	s.out <- cnk
 
 	select {
