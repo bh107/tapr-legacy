@@ -39,12 +39,6 @@ func (lib *Library) String() string {
 	return lib.name
 }
 
-type iodev struct {
-	unused          chan *Drive
-	shared          chan *Drive
-	exclusiveWaiter chan struct{}
-}
-
 type driveGroup struct {
 	drives []*Drive
 	in     chan *Chunk
@@ -58,7 +52,6 @@ type Server struct {
 	chunkdb *bolt.DB
 	inv     *inventory.DB
 
-	//iodevs map[string]iodev
 	groups map[string]*driveGroup
 
 	mocked bool
@@ -113,16 +106,7 @@ func New(cfg *config.Config, debug bool, audit bool, mock bool) (*Server, error)
 
 	srv.libraries = make(map[string]*Library)
 	srv.drives = make(map[string][]*Drive)
-	//srv.iodevs = make(map[string]iodev)
 	srv.groups = make(map[string]*driveGroup)
-
-	/*
-		for _, d := range []string{"read", "write"} {
-			srv.iodevs[d] = iodev{
-				unused: make(chan *Drive),
-				shared: make(chan *Drive),
-			}
-		}*/
 
 	// initialize libraries
 	for _, libCfg := range cfg.Libraries {
@@ -337,10 +321,40 @@ func (srv *Server) Store(ctx context.Context, archive string, rd io.Reader) erro
 
 	if pol.Parallel() {
 		if grp, ok := srv.groups[pol.WriteGroup]; ok {
-			stream.out = grp.in
-		}
+			ch := make(chan struct{})
 
-		return errors.New("no such write group")
+			// send use request to all drives
+			for _, drv := range grp.drives {
+				go func(drv *Drive) {
+					if err := drv.Use(ctx, pol); err != nil {
+						log.Printf("%v: %v", drv, err)
+					}
+
+					select {
+					case <-ctx.Done():
+						drv.Release(context.Background())
+					case ch <- struct{}{}:
+					}
+				}(drv)
+			}
+
+			for range grp.drives {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-ch:
+				}
+			}
+
+			stream.out = grp.in
+			stream.onclose = func() {
+				for _, drv := range grp.drives {
+					drv.Release(context.Background())
+				}
+			}
+		} else {
+			return errors.New("no such write group")
+		}
 	} else {
 		// Get a drive
 		drv, err := AcquireDrive(ctx, srv.drives["write"], pol)

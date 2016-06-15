@@ -85,7 +85,7 @@ func (s *Stream) Close(ctx context.Context) error {
 
 	log.Print("steam closing")
 
-	s.onclose()
+	go s.onclose()
 
 	return nil
 }
