@@ -14,6 +14,8 @@ type Stream struct {
 	cnkCounter int
 	pol        *policy.Policy
 
+	onclose func()
+
 	errc chan error
 
 	out chan *Chunk
@@ -82,6 +84,8 @@ func (s *Stream) Close(ctx context.Context) error {
 	}
 
 	log.Print("steam closing")
+
+	s.onclose()
 
 	return nil
 }

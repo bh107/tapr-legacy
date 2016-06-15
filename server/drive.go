@@ -7,18 +7,29 @@ import (
 	"syscall"
 
 	"github.com/bh107/tapr/mtx"
+	"github.com/bh107/tapr/stream/policy"
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 )
 
+type Request interface {
+	fmt.Stringer
+
+	Execute(context.Context)
+	Context() context.Context
+}
+
 type Drive struct {
 	writer *Writer
 
-	ctrl     chan DriveRequest
-	released chan struct{}
+	ctrl     chan Request
 	in       chan *Chunk
+	reserved chan struct{}
+	waiting  chan struct{}
 
-	handoff bool
+	handoff  bool
+	attached int
+	shared   bool
 
 	path    string
 	devtype string
@@ -38,11 +49,14 @@ func (srv *Server) NewDrive(path string, devtype string, slot int, lib *Library)
 		slot:    slot,
 		lib:     lib,
 
-		ctrl:     make(chan DriveRequest),
-		released: make(chan struct{}),
+		ctrl:     make(chan Request),
 		in:       make(chan *Chunk),
+		reserved: make(chan struct{}),
+		waiting:  make(chan struct{}),
 
 		srv: srv,
+
+		shared: true,
 	}
 
 	return drv
@@ -52,38 +66,168 @@ func (drv *Drive) String() string {
 	return drv.path
 }
 
-type DriveRequest interface {
-	fmt.Stringer
+type ReleaseRequest struct {
+	ctx context.Context
+}
 
-	Execute(*Drive) error
+func (req ReleaseRequest) String() string {
+	return "release"
+}
+
+func (req ReleaseRequest) Context() context.Context {
+	return req.ctx
+}
+
+func (req ReleaseRequest) Execute(ctx context.Context) {
+	drv := ctx.Value(driveKey).(*Drive)
+
+	drv.attached--
+
+	select {
+	case <-drv.reserved:
+		// someone was waiting for the drive
+		drv.shared = false
+		drv.attached++
+	default:
+		select {
+		case <-drv.waiting:
+			drv.attached++
+		default:
+		}
+
+		// just return as shared
+		drv.shared = true
+	}
+
+	log.Print(drv.attached)
+}
+
+func (drv *Drive) Release(ctx context.Context) {
+	log.Printf("release called for %v", drv)
+	ctx = context.WithValue(ctx, driveKey, drv)
+	drv.ctrl <- &ReleaseRequest{ctx}
+}
+
+type UseRequest struct {
+	ctx context.Context
+	ok  chan struct{}
+	pol *policy.Policy
+}
+
+func (req UseRequest) String() string {
+	return "use"
+}
+
+func (req UseRequest) Context() context.Context {
+	return req.ctx
+}
+
+func (req UseRequest) Execute(ctx context.Context) {
+	drv := ctx.Value(driveKey).(*Drive)
+
+	pol := req.pol
+
+	if pol.Exclusive {
+		if drv.attached == 0 {
+			drv.shared = false
+			drv.attached++
+
+			close(req.ok)
+
+			return
+		}
+
+		go func() {
+			select {
+			case <-ctx.Done():
+				// request cancelled or timed out
+				return
+			case drv.reserved <- struct{}{}:
+				// woop, we got the drive
+				close(req.ok)
+			}
+		}()
+	} else {
+		if drv.shared {
+			drv.attached++
+
+			close(req.ok)
+
+			return
+		}
+	}
+
+	// reserve the drive for exclusive access when possible
+	go func() {
+		select {
+		case <-ctx.Done():
+			// request cancelled or timed out
+			return
+		case drv.waiting <- struct{}{}:
+			// woop, we got the drive
+			close(req.ok)
+		}
+	}()
+}
+
+type key int
+
+const driveKey key = 0
+
+func (drv *Drive) Use(ctx context.Context, pol *policy.Policy) error {
+	ctx = context.WithValue(ctx, driveKey, drv)
+
+	req := &UseRequest{
+		ctx: ctx,
+		pol: pol,
+		ok:  make(chan struct{}),
+	}
+
+	drv.Ctrl(req)
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-req.ok:
+	}
+
+	return nil
 }
 
 type Takeover struct {
-	Cnk  *Chunk
-	From *Drive
+	cnk  *Chunk
+	from *Drive
+	to   *Drive
 }
 
 func (req Takeover) String() string {
-	return fmt.Sprintf("takeover %v from %v", req.Cnk.upstream, req.From)
+	return fmt.Sprintf("takeover %v from %v", req.cnk.upstream, req.from)
 }
 
-func (req Takeover) Execute(drv *Drive) error {
-	cnk := req.Cnk
+func (req Takeover) Context() context.Context {
+	return context.TODO()
+}
+
+func (req Takeover) Execute(ctx context.Context) {
+	cnk := req.cnk
 
 	// do not update the out channel if the stream is parallel
 	if !cnk.upstream.Parallel() {
-		cnk.upstream.out = drv.in
+		cnk.upstream.out = req.to.in
+		cnk.upstream.onclose = func() { req.to.Release(context.Background()) }
 	}
 
 	// Send the chunk that wasn't written to the new drive.
 	// The drive will report back to the stream which
 	// will continue on the new drive.
-	go func() { drv.writer.in <- cnk }()
-
-	return nil
+	go func() { req.to.in <- cnk }()
 }
 
-func (drv *Drive) Ctrl(req DriveRequest) {
+func (drv *Drive) Takeover(cnk *Chunk, from *Drive) {
+	drv.Ctrl(&Takeover{cnk, from, drv})
+}
+
+func (drv *Drive) Ctrl(req Request) {
 	drv.ctrl <- req
 }
 
@@ -126,7 +270,7 @@ func (drv *Drive) Run() {
 					go func() {
 						defer cancel()
 
-						new, err := drv.srv.GetDrive(ctx, cnk.upstream.pol)
+						new, err := AcquireDrive(ctx, drv.srv.drives["write"], cnk.upstream.pol)
 						if err != nil {
 							log.Print(err)
 							return
@@ -161,7 +305,8 @@ func (drv *Drive) Run() {
 						case newdrv := <-reqDrive:
 							if newdrv != nil {
 								// hand off stream
-								go newdrv.Ctrl(Takeover{cnk, drv})
+								drv.attached--
+								go newdrv.Takeover(cnk, drv)
 								handedoff = true
 							}
 
@@ -194,9 +339,7 @@ func (drv *Drive) Run() {
 
 		case req := <-drv.ctrl:
 			log.Printf("%v ctrl request: %v", drv, req)
-			if err := req.Execute(drv); err != nil {
-				log.Print(err)
-			}
+			req.Execute(req.Context())
 		}
 	}
 }

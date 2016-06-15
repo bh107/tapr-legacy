@@ -58,7 +58,7 @@ type Server struct {
 	chunkdb *bolt.DB
 	inv     *inventory.DB
 
-	iodevs map[string]iodev
+	//iodevs map[string]iodev
 	groups map[string]*driveGroup
 
 	mocked bool
@@ -113,15 +113,16 @@ func New(cfg *config.Config, debug bool, audit bool, mock bool) (*Server, error)
 
 	srv.libraries = make(map[string]*Library)
 	srv.drives = make(map[string][]*Drive)
-	srv.iodevs = make(map[string]iodev)
+	//srv.iodevs = make(map[string]iodev)
 	srv.groups = make(map[string]*driveGroup)
 
-	for _, d := range []string{"read", "write"} {
-		srv.iodevs[d] = iodev{
-			unused: make(chan *Drive),
-			shared: make(chan *Drive),
-		}
-	}
+	/*
+		for _, d := range []string{"read", "write"} {
+			srv.iodevs[d] = iodev{
+				unused: make(chan *Drive),
+				shared: make(chan *Drive),
+			}
+		}*/
 
 	// initialize libraries
 	for _, libCfg := range cfg.Libraries {
@@ -195,9 +196,11 @@ func New(cfg *config.Config, debug bool, audit bool, mock bool) (*Server, error)
 
 		go drv.Run()
 
-		go func(drv *Drive) {
-			srv.iodevs["write"].shared <- drv
-		}(drv)
+		/*
+			go func(drv *Drive) {
+				srv.iodevs["write"].shared <- drv
+			}(drv)
+		*/
 	}
 
 	return srv, nil
@@ -340,12 +343,13 @@ func (srv *Server) Store(ctx context.Context, archive string, rd io.Reader) erro
 		return errors.New("no such write group")
 	} else {
 		// Get a drive
-		drv, err := srv.GetDrive(ctx, pol)
+		drv, err := AcquireDrive(ctx, srv.drives["write"], pol)
 		if err != nil {
 			return err
 		}
 
 		stream.out = drv.in
+		stream.onclose = func() { drv.Release(context.Background()) }
 	}
 
 	if cancel != nil {
@@ -413,59 +417,36 @@ func (srv *Server) Create(archive string) error {
 	})
 }
 
-// Get returns a shared/exclusive writer or nil if operation is cancelled
-// before one could be acquired.
-func (srv *Server) GetDrive(ctx context.Context, pol *policy.Policy) (*Drive, error) {
-	var drv *Drive
-	var err error
+func AcquireDrive(ctx context.Context, pool []*Drive, pol *policy.Policy) (*Drive, error) {
+	ch := make(chan *Drive)
 
-	if pol.Exclusive {
-		drv, err = srv.GetExclusive(ctx)
-	} else {
-		drv, err = srv.GetShared(ctx)
+	ctx, cancel := context.WithCancel(ctx)
+
+	// send use request to all drives
+	for _, drv := range pool {
+		go func(drv *Drive) {
+			if err := drv.Use(ctx, pol); err != nil {
+				log.Printf("%v: %v", drv, err)
+			}
+
+			select {
+			case <-ctx.Done():
+				drv.Release(context.Background())
+			case ch <- drv:
+			}
+		}(drv)
 	}
 
-	if err != nil {
-		return nil, err
-	}
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case drv := <-ch:
+			// cancel other requests
+			cancel()
 
-	return drv, nil
-}
-
-// GetShared returns a shared writer or nil if operation is cancelled before
-// one could be acquired.
-func (srv *Server) GetShared(ctx context.Context) (*Drive, error) {
-	var drv *Drive
-
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case drv = <-srv.iodevs["write"].shared:
-		log.Printf("GetShared: got %v from shared", drv)
-	}
-
-	// send it back to the shared channel if anyone wants one from it, or to
-	// the unused, if it is released before we have a chance to send it.
-	go func() { srv.iodevs["write"].shared <- drv }()
-
-	return drv, nil
-}
-
-// GetExclusive returns a writer or nil if timeout was closed before one could
-// be acquired.
-func (srv *Server) GetExclusive(ctx context.Context) (*Drive, error) {
-	// tell the communal hippies that we want the table for our selves and
-	// don't wanna starve!
-	go func() { srv.iodevs["write"].exclusiveWaiter <- struct{}{} }()
-
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case drv := <-srv.iodevs["write"].unused:
-		// wait until released, then put back as unused
-		go func() { <-drv.released; srv.iodevs["write"].unused <- drv }()
-
-		return drv, nil
+			return drv, nil
+		}
 	}
 }
 
