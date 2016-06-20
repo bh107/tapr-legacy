@@ -1,13 +1,14 @@
-package server
+package stream
 
 import "sync"
 
 // DefaultChunkSize defines the well.... default chunk size. By default it is
 // 64 megabytes.
-//const DefaultChunkSize = 64 * 1 << 20
+const DefaultChunkSize = 128 * 1 << 20
+
 //const DefaultChunkSize = 4 * 1 << 20
 
-const DefaultChunkSize = 4096
+//const DefaultChunkSize = 4096
 
 // ChunkPool abstracts a sync.Pool for Chunks.
 type ChunkPool struct {
@@ -60,8 +61,6 @@ func (cnk *Chunk) add(p []byte) (n int) {
 		p = p[:free]
 	}
 
-	//copy(cnk.buf[len(cnk.buf):], p)
-	//cnk.buf = append(cnk.buf[len(cnk.buf):], p...)
 	cnk.buf = append(cnk.buf, p...)
 
 	return len(p)

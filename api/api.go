@@ -70,6 +70,6 @@ func NewRouter(srv *server.Server) *mux.Router {
 func Start(srv *server.Server) error {
 	router := NewRouter(srv)
 
-	log.Print("http-api: starting http server...")
+	log.Print("starting http2 server on https://localhost:8080")
 	return http.ListenAndServeTLS(":8080", "cert.pem", "key.pem", router)
 }

@@ -32,7 +32,7 @@ type Spec struct {
 }
 
 var serialCounter int
-var serialPrefixes = []rune{'A', 'B', 'C'}
+var serialPrefixes = []rune{'A', 'B', 'C', 'D'}
 
 func New(name string) *Changer {
 	if serialCounter > len(serialPrefixes)-1 {

@@ -40,6 +40,7 @@ func Store(srv *server.Server, rw http.ResponseWriter, req *http.Request) {
 		ctx, cancel = context.WithCancel(context.Background())
 	}
 
+	// cancel context as soon as the handler terminates
 	defer cancel()
 
 	pol, err := policy.Construct(req)
@@ -50,7 +51,7 @@ func Store(srv *server.Server, rw http.ResponseWriter, req *http.Request) {
 	ctx = policy.Wrap(ctx, pol)
 
 	if archive, ok := vars["id"]; ok {
-		if err := srv.Create(archive); err != nil {
+		if err := srv.Create(ctx, archive); err != nil {
 			internalServerError(rw, err)
 			return
 		}

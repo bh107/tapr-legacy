@@ -63,12 +63,7 @@ func initConfig() {
 	}
 
 	if flagDebug {
-		fmt.Println("[+] debug enabled")
 		log.SetFlags(log.Lshortfile | log.Ltime)
-	}
-
-	if mock {
-		fmt.Println("[+] mocking enabled")
 	}
 
 	if cfgFile == "" {
@@ -97,9 +92,12 @@ func run(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	go func() {
-		log.Println(http.ListenAndServe("localhost:6060", nil))
-	}()
+	if flagDebug {
+		log.Print("starting debug http server at :6060")
+		go func() {
+			log.Println(http.ListenAndServe("localhost:6060", nil))
+		}()
+	}
 
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt)

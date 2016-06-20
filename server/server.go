@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"time"
 
 	"golang.org/x/net/context"
 
@@ -16,6 +15,7 @@ import (
 	"github.com/bh107/tapr/inventory"
 	"github.com/bh107/tapr/ltfs"
 	"github.com/bh107/tapr/mtx"
+	"github.com/bh107/tapr/stream"
 	"github.com/bh107/tapr/stream/policy"
 	"github.com/pkg/errors"
 
@@ -41,7 +41,7 @@ func (lib *Library) String() string {
 
 type driveGroup struct {
 	drives []*Drive
-	in     chan *Chunk
+	in     chan *stream.Chunk
 }
 
 type Server struct {
@@ -110,11 +110,9 @@ func New(cfg *config.Config, debug bool, audit bool, mock bool) (*Server, error)
 
 	// initialize libraries
 	for _, libCfg := range cfg.Libraries {
-		log.Printf("init: adding library:   \"%s\"", libCfg.Name)
 		lib := NewLibrary(libCfg.Name)
 
 		for _, chgrCfg := range libCfg.Changers {
-			log.Printf("init: + adding changer: %s", chgrCfg.Path)
 			if mock {
 				lib.chgr = changer.Mock(chgrCfg.Path)
 			} else {
@@ -123,7 +121,6 @@ func New(cfg *config.Config, debug bool, audit bool, mock bool) (*Server, error)
 		}
 
 		for _, drvCfg := range libCfg.Drives {
-			log.Printf("init: + adding drive:   %s (%s)", drvCfg.Path, drvCfg.Type)
 			drv := srv.NewDrive(drvCfg.Path, drvCfg.Type, drvCfg.Slot, lib)
 			lib.drives[drvCfg.Path] = append(lib.drives[drvCfg.Path], drv)
 			srv.drives[drvCfg.Type] = append(srv.drives[drvCfg.Type], drv)
@@ -132,9 +129,8 @@ func New(cfg *config.Config, debug bool, audit bool, mock bool) (*Server, error)
 				var grp *driveGroup
 				var ok bool
 				if grp, ok = srv.groups[drvCfg.Group]; !ok {
-					log.Printf("init: + adding group: %s", drvCfg.Group)
 					grp = &driveGroup{
-						in:     make(chan *Chunk),
+						in:     make(chan *stream.Chunk, 32),
 						drives: make([]*Drive, 0),
 					}
 					srv.groups[drvCfg.Group] = grp
@@ -142,7 +138,6 @@ func New(cfg *config.Config, debug bool, audit bool, mock bool) (*Server, error)
 
 				drv.group = grp
 
-				log.Printf("init: + adding %s to %s group", drv, drvCfg.Group)
 				grp.drives = append(grp.drives, drv)
 			}
 		}
@@ -150,18 +145,21 @@ func New(cfg *config.Config, debug bool, audit bool, mock bool) (*Server, error)
 		srv.libraries[libCfg.Name] = lib
 
 		if audit {
-			log.Printf("init: audit started for \"%s\" library", libCfg.Name)
 			_, err := srv.Audit(context.Background(), libCfg.Name)
 			if err != nil {
 				return nil, err
 			}
-			log.Printf("init: audit finished for \"%s\" library", libCfg.Name)
 		}
 
 	}
 
+	//	var wg sync.WaitGroup
 	for _, drv := range srv.drives["write"] {
-		vol, err := srv.GetScratch(drv)
+		//wg.Add(1)
+		//		go func(drv *Drive) {
+		//	defer wg.Done()
+
+		_, err := srv.GetScratch(drv)
 		if err != nil {
 			panic(err)
 		}
@@ -171,21 +169,18 @@ func New(cfg *config.Config, debug bool, audit bool, mock bool) (*Server, error)
 			panic(err)
 		}
 
-		var agg chan *Chunk
+		var agg chan *stream.Chunk
 		if drv.group != nil {
 			agg = drv.group.in
 		}
 
-		drv.writer = NewWriter(mountpoint, vol, drv.in, agg, drv)
+		drv.writer = stream.NewWriter(mountpoint, drv.in, agg, drv.path)
 
 		go drv.Run()
-
-		/*
-			go func(drv *Drive) {
-				srv.iodevs["write"].shared <- drv
-			}(drv)
-		*/
+		//		}(drv)
 	}
+
+	//	wg.Wait()
 
 	return srv, nil
 }
@@ -203,12 +198,14 @@ func (srv *Server) Load(dev *Drive, vol *mtx.Volume) error {
 	}
 
 	err := dev.lib.chgr.Use(func(tx *changer.Tx) error {
-		log.Printf("load: loading drive %s with volume %s from slot %d", dev, vol, vol.Home)
+		log.Printf("loading drive %s with volume %s from slot %d", dev, vol, vol.Home)
 
-		// simulate loading time
-		if srv.mocked {
-			time.Sleep(2 * time.Second)
-		}
+		/*
+			// simulate loading time
+			if srv.mocked {
+				time.Sleep(2 * time.Second)
+			}
+		*/
 
 		var err error
 		err = tx.Load(vol.Home, dev.slot)
@@ -239,12 +236,14 @@ func (srv *Server) Unload(dev *Drive) error {
 	}
 
 	err := dev.lib.chgr.Use(func(tx *changer.Tx) error {
-		log.Printf("unload: unloading drive %s, returning volume %s to slot %d", dev, dev.vol, dev.vol.Home)
+		log.Printf("unloading drive %s, returning volume %s to slot %d", dev, dev.vol, dev.vol.Home)
 
-		// simulate unloading time
-		if srv.mocked {
-			time.Sleep(2 * time.Second)
-		}
+		/*
+			// simulate unloading time
+			if srv.mocked {
+				time.Sleep(2 * time.Second)
+			}
+		*/
 
 		var err error
 		err = tx.Unload(dev.vol.Home, dev.slot)
@@ -301,7 +300,7 @@ func (e ErrShortWrite) Error() string {
 
 // Store grabs an io.Reader, reads until EOF and stores the data on a tape.
 func (srv *Server) Store(ctx context.Context, archive string, rd io.Reader) error {
-	log.Printf("store: store archive: %s", archive)
+	log.Printf("store archive: %s", archive)
 
 	pol := policy.DefaultPolicy
 
@@ -311,7 +310,7 @@ func (srv *Server) Store(ctx context.Context, archive string, rd io.Reader) erro
 	}
 
 	// create new stream
-	stream := NewStream(archive, pol)
+	stream := stream.New(archive, pol)
 
 	// create a context with setup timeout if necessary
 	var cancel context.CancelFunc
@@ -332,7 +331,7 @@ func (srv *Server) Store(ctx context.Context, archive string, rd io.Reader) erro
 
 					select {
 					case <-ctx.Done():
-						drv.Release(context.Background())
+						drv.Release()
 					case ch <- struct{}{}:
 					}
 				}(drv)
@@ -346,24 +345,29 @@ func (srv *Server) Store(ctx context.Context, archive string, rd io.Reader) erro
 				}
 			}
 
-			stream.out = grp.in
-			stream.onclose = func() {
+			stream.SetOut(grp.in)
+
+			stream.OnClose(func() {
 				for _, drv := range grp.drives {
-					drv.Release(context.Background())
+					drv.Release()
 				}
-			}
+			})
+
 		} else {
 			return errors.New("no such write group")
 		}
 	} else {
 		// Get a drive
-		drv, err := AcquireDrive(ctx, srv.drives["write"], pol)
+		drv, err := acquireDrive(ctx, srv.drives["write"], pol)
 		if err != nil {
 			return err
 		}
 
-		stream.out = drv.in
-		stream.onclose = func() { drv.Release(context.Background()) }
+		stream.SetOut(drv.in)
+
+		stream.OnClose(func() {
+			drv.Release()
+		})
 	}
 
 	if cancel != nil {
@@ -411,16 +415,14 @@ func (srv *Server) Store(ctx context.Context, archive string, rd io.Reader) erro
 
 func (srv *Server) Shutdown() {
 	fmt.Println()
-	log.Print("shutdown: starting...")
+	log.Print("shutting down...")
 	srv.chunkdb.Close()
-	log.Print("shutdown: chunkdb closed")
+	log.Print("chunk database closed")
 	srv.inv.Close()
-	log.Print("shutdown: inv closed")
-
-	log.Print("shutdown: stats")
+	log.Print("inventory database closed")
 }
 
-func (srv *Server) Create(archive string) error {
+func (srv *Server) Create(ctx context.Context, archive string) error {
 	return srv.chunkdb.Update(func(tx *bolt.Tx) error {
 		_, err := tx.CreateBucket([]byte(archive))
 		if err != nil {
@@ -431,36 +433,36 @@ func (srv *Server) Create(archive string) error {
 	})
 }
 
-func AcquireDrive(ctx context.Context, pool []*Drive, pol *policy.Policy) (*Drive, error) {
+func acquireDrive(ctx context.Context, pool []*Drive, pol *policy.Policy) (*Drive, error) {
 	ch := make(chan *Drive)
 
-	ctx, cancel := context.WithCancel(ctx)
+	ctx2, cancel := context.WithCancel(ctx)
 
 	// send use request to all drives
 	for _, drv := range pool {
 		go func(drv *Drive) {
-			if err := drv.Use(ctx, pol); err != nil {
+			if err := drv.Use(ctx2, pol); err != nil {
 				log.Printf("%v: %v", drv, err)
+				return
 			}
 
 			select {
-			case <-ctx.Done():
-				drv.Release(context.Background())
+			case <-ctx2.Done():
+				drv.Release()
 			case ch <- drv:
 			}
 		}(drv)
 	}
 
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case drv := <-ch:
-			// cancel other requests
-			cancel()
+	select {
+	case <-ctx.Done():
+		cancel()
+		return nil, ctx.Err()
+	case drv := <-ch:
+		// cancel other requests
+		cancel()
 
-			return drv, nil
-		}
+		return drv, nil
 	}
 }
 
@@ -485,7 +487,7 @@ func (srv *Server) GetScratch(drv *Drive) (*mtx.Volume, error) {
 		return nil, err
 	}
 
-	log.Printf("GetScratch: new volume mounted at %s", mountpoint)
+	log.Printf("new volume %v mounted at %s", vol, mountpoint)
 	if err := os.MkdirAll(mountpoint, os.ModePerm); err != nil {
 		return nil, err
 	}

@@ -1,4 +1,4 @@
-package server
+package stream
 
 import (
 	"log"
@@ -24,7 +24,7 @@ type Stream struct {
 }
 
 // New creates a new byte stream.
-func NewStream(name string, pol *policy.Policy) *Stream {
+func New(name string, pol *policy.Policy) *Stream {
 	s := &Stream{
 		archive: name,
 		errc:    make(chan error),
@@ -44,6 +44,22 @@ func (s *Stream) String() string {
 
 func (s *Stream) Parallel() bool {
 	return s.pol.WriteGroup != ""
+}
+
+func (s *Stream) Policy() *policy.Policy {
+	return s.pol
+}
+
+func (s *Stream) Errc() chan<- error {
+	return s.errc
+}
+
+func (s *Stream) SetOut(out chan *Chunk) {
+	s.out = out
+}
+
+func (s *Stream) OnClose(fn func()) {
+	s.onclose = fn
 }
 
 // Write writes bytes to the stream. Chunks are only flushed to backend storage
@@ -79,11 +95,12 @@ func (s *Stream) Write(ctx context.Context, p []byte) (n int, err error) {
 // Close closes the current stream and flushed the partial chunk to backend
 // storage.
 func (s *Stream) Close(ctx context.Context) error {
+	// write the partial chunk, if any
 	if err := s.writeChunk(ctx, s.tmp); err != nil {
 		return err
 	}
 
-	log.Print("steam closing")
+	log.Print("closing stream")
 
 	go s.onclose()
 
@@ -99,18 +116,20 @@ func (s *Stream) writeChunk(ctx context.Context, cnk *Chunk) error {
 	// send chunk
 	s.out <- cnk
 
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-s.errc:
-		if err != nil {
-			return err
+	/*
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err := <-s.errc:
+			if err != nil {
+				return err
+			}
 		}
-	}
 
-	// reset and return chunk to stream chunk pool
-	cnk.reset()
-	s.chunkpool.Put(cnk)
+		// reset and return chunk to stream chunk pool
+		cnk.reset()
+		s.chunkpool.Put(cnk)
+	*/
 
 	return nil
 }

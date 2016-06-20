@@ -7,6 +7,7 @@ import (
 	"syscall"
 
 	"github.com/bh107/tapr/mtx"
+	"github.com/bh107/tapr/stream"
 	"github.com/bh107/tapr/stream/policy"
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
@@ -15,21 +16,24 @@ import (
 type Request interface {
 	fmt.Stringer
 
+	// Code running in the Execute function will run in the main process, thus
+	// it is safe to modify the process state.
 	Execute(context.Context)
 	Context() context.Context
 }
 
 type Drive struct {
-	writer *Writer
+	writer *stream.Writer
 
 	ctrl     chan Request
-	in       chan *Chunk
+	in       chan *stream.Chunk
 	reserved chan struct{}
 	waiting  chan struct{}
 
-	handoff  bool
-	attached int
-	shared   bool
+	handoff     bool
+	attached    int
+	shared      bool
+	maxAttached int
 
 	path    string
 	devtype string
@@ -50,13 +54,15 @@ func (srv *Server) NewDrive(path string, devtype string, slot int, lib *Library)
 		lib:     lib,
 
 		ctrl:     make(chan Request),
-		in:       make(chan *Chunk),
+		in:       make(chan *stream.Chunk),
 		reserved: make(chan struct{}),
 		waiting:  make(chan struct{}),
 
 		srv: srv,
 
 		shared: true,
+
+		maxAttached: 4,
 	}
 
 	return drv
@@ -79,38 +85,42 @@ func (req ReleaseRequest) Context() context.Context {
 }
 
 func (req ReleaseRequest) Execute(ctx context.Context) {
-	drv := ctx.Value(driveKey).(*Drive)
+	drv := ctx.Value(DriveContextKey).(*Drive)
 
 	drv.attached--
 
-	select {
-	case <-drv.reserved:
-		// someone was waiting for the drive
-		drv.shared = false
-		drv.attached++
-	default:
+	if drv.attached == 0 {
 		select {
-		case <-drv.waiting:
+		case <-drv.reserved:
+			// someone was waiting for exclusive access
+			drv.shared = false
 			drv.attached++
 		default:
 		}
 
-		// just return as shared
-		drv.shared = true
+		return
 	}
 
-	log.Print(drv.attached)
+	// see if anyone is waiting in queue for shared access (read on the channel
+	// to allow one process to proceed).
+	select {
+	case <-drv.waiting:
+		drv.attached++
+	default:
+	}
+
+	// just return as shared
+	drv.shared = true
 }
 
-func (drv *Drive) Release(ctx context.Context) {
-	log.Printf("release called for %v", drv)
-	ctx = context.WithValue(ctx, driveKey, drv)
+func (drv *Drive) Release() {
+	ctx := context.WithValue(context.Background(), DriveContextKey, drv)
 	drv.ctrl <- &ReleaseRequest{ctx}
 }
 
 type UseRequest struct {
 	ctx context.Context
-	ok  chan struct{}
+	ok  chan error
 	pol *policy.Policy
 }
 
@@ -123,16 +133,18 @@ func (req UseRequest) Context() context.Context {
 }
 
 func (req UseRequest) Execute(ctx context.Context) {
-	drv := ctx.Value(driveKey).(*Drive)
+	drv := ctx.Value(DriveContextKey).(*Drive)
 
 	pol := req.pol
 
 	if pol.Exclusive {
 		if drv.attached == 0 {
-			drv.shared = false
-			drv.attached++
-
-			close(req.ok)
+			select {
+			case <-ctx.Done():
+			case req.ok <- nil:
+				drv.shared = false
+				drv.attached++
+			}
 
 			return
 		}
@@ -144,20 +156,29 @@ func (req UseRequest) Execute(ctx context.Context) {
 				return
 			case drv.reserved <- struct{}{}:
 				// woop, we got the drive
-				close(req.ok)
+				select {
+				case <-ctx.Done():
+					// no one wanted it anyway, release it again
+					drv.Release()
+				case req.ok <- nil:
+				}
 			}
 		}()
-	} else {
-		if drv.shared {
-			drv.attached++
 
-			close(req.ok)
-
-			return
-		}
+		return
 	}
 
-	// reserve the drive for exclusive access when possible
+	if drv.shared && drv.attached < drv.maxAttached {
+		select {
+		case <-ctx.Done():
+		case req.ok <- nil:
+			drv.attached++
+		}
+
+		return
+	}
+
+	// wait for the drive to become available asynchronously
 	go func() {
 		select {
 		case <-ctx.Done():
@@ -165,22 +186,31 @@ func (req UseRequest) Execute(ctx context.Context) {
 			return
 		case drv.waiting <- struct{}{}:
 			// woop, we got the drive
-			close(req.ok)
+			select {
+			case <-ctx.Done():
+				// no one wanted it anyway, release it
+				drv.Release()
+			case req.ok <- nil:
+			}
 		}
 	}()
 }
 
-type key int
+type contextKey struct {
+	name string
+}
 
-const driveKey key = 0
+func (k *contextKey) String() string { return "server context value " + k.name }
+
+var DriveContextKey = &contextKey{"drive"}
 
 func (drv *Drive) Use(ctx context.Context, pol *policy.Policy) error {
-	ctx = context.WithValue(ctx, driveKey, drv)
+	ctx = context.WithValue(ctx, DriveContextKey, drv)
 
 	req := &UseRequest{
 		ctx: ctx,
 		pol: pol,
-		ok:  make(chan struct{}),
+		ok:  make(chan error),
 	}
 
 	drv.Ctrl(req)
@@ -188,20 +218,19 @@ func (drv *Drive) Use(ctx context.Context, pol *policy.Policy) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-req.ok:
+	case err := <-req.ok:
+		return err
 	}
-
-	return nil
 }
 
 type Takeover struct {
-	cnk  *Chunk
+	cnk  *stream.Chunk
 	from *Drive
 	to   *Drive
 }
 
 func (req Takeover) String() string {
-	return fmt.Sprintf("takeover %v from %v", req.cnk.upstream, req.from)
+	return fmt.Sprintf("takeover %v from %v", req.cnk.Upstream(), req.from)
 }
 
 func (req Takeover) Context() context.Context {
@@ -210,11 +239,14 @@ func (req Takeover) Context() context.Context {
 
 func (req Takeover) Execute(ctx context.Context) {
 	cnk := req.cnk
+	upstream := cnk.Upstream()
 
 	// do not update the out channel if the stream is parallel
-	if !cnk.upstream.Parallel() {
-		cnk.upstream.out = req.to.in
-		cnk.upstream.onclose = func() { req.to.Release(context.Background()) }
+	if !upstream.Parallel() {
+		upstream.SetOut(req.to.in)
+		upstream.OnClose(func() {
+			req.to.Release()
+		})
 	}
 
 	// Send the chunk that wasn't written to the new drive.
@@ -223,7 +255,7 @@ func (req Takeover) Execute(ctx context.Context) {
 	go func() { req.to.in <- cnk }()
 }
 
-func (drv *Drive) Takeover(cnk *Chunk, from *Drive) {
+func (drv *Drive) Takeover(cnk *stream.Chunk, from *Drive) {
 	drv.Ctrl(&Takeover{cnk, from, drv})
 }
 
@@ -231,7 +263,7 @@ func (drv *Drive) Ctrl(req Request) {
 	drv.ctrl <- req
 }
 
-func (drv *Drive) Agg() chan *Chunk {
+func (drv *Drive) Agg() chan *stream.Chunk {
 	if drv.group != nil {
 		return drv.group.in
 	}
@@ -250,8 +282,8 @@ func (drv *Drive) Mountpoint() (string, error) {
 func (drv *Drive) Run() {
 	for {
 		select {
-		case err := <-drv.writer.errc:
-			if errIO, ok := err.(ErrIO); ok {
+		case err := <-drv.writer.Errc():
+			if errIO, ok := err.(stream.ErrIO); ok {
 				cnk := errIO.Chunk
 
 				if errIO.Err == syscall.ENOSPC {
@@ -270,7 +302,7 @@ func (drv *Drive) Run() {
 					go func() {
 						defer cancel()
 
-						new, err := AcquireDrive(ctx, drv.srv.drives["write"], cnk.upstream.pol)
+						new, err := acquireDrive(ctx, drv.srv.drives["write"], cnk.Upstream().Policy())
 						if err != nil {
 							log.Print(err)
 							return
@@ -280,9 +312,9 @@ func (drv *Drive) Run() {
 					}()
 
 					// No context needed, should not be cancelled in any case.
-					reqWriter := make(chan *Writer)
+					reqWriter := make(chan *stream.Writer)
 					go func() {
-						vol, err := drv.srv.GetScratch(drv)
+						_, err := drv.srv.GetScratch(drv)
 						if err != nil {
 							log.Print(err)
 							reqWriter <- nil
@@ -296,7 +328,7 @@ func (drv *Drive) Run() {
 							return
 						}
 
-						reqWriter <- NewWriter(mountpoint, vol, drv.in, drv.Agg(), drv)
+						reqWriter <- stream.NewWriter(mountpoint, drv.in, drv.Agg(), drv.path)
 					}()
 
 					var handedoff bool
@@ -331,14 +363,14 @@ func (drv *Drive) Run() {
 				} else {
 					// XXX other error, report to stream. Mark volume as
 					// suspicious and mount new one.
-					cnk.upstream.errc <- errIO.Err
+					cnk.Upstream().Errc() <- errIO.Err
 				}
 			} else {
 				log.Printf("%v: ERROR: %s", drv, err)
 			}
 
 		case req := <-drv.ctrl:
-			log.Printf("%v ctrl request: %v", drv, req)
+			log.Printf("%v control request: %v", drv, req)
 			req.Execute(req.Context())
 		}
 	}

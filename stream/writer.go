@@ -1,11 +1,9 @@
-package server
+package stream
 
 import (
 	"fmt"
 	"log"
-	"os"
-	"path"
-	"syscall"
+	"time"
 
 	"github.com/bh107/tapr/mtx"
 )
@@ -28,14 +26,15 @@ type Writer struct {
 	errc chan error
 
 	media *mtx.Volume
-	drv   *Drive
+
+	device string
 
 	in  chan *Chunk
 	agg chan *Chunk
 }
 
 // NewWriter returns a new Writer and starts the communicating process.
-func NewWriter(root string, media *mtx.Volume, in chan *Chunk, agg chan *Chunk, drv *Drive) *Writer {
+func NewWriter(root string, in chan *Chunk, agg chan *Chunk, device string) *Writer {
 	wr := &Writer{
 		root: root,
 
@@ -43,9 +42,9 @@ func NewWriter(root string, media *mtx.Volume, in chan *Chunk, agg chan *Chunk, 
 		in:  in,
 		agg: agg,
 
-		errc: make(chan error),
+		device: device,
 
-		drv: drv,
+		errc: make(chan error),
 	}
 
 	go wr.run()
@@ -53,8 +52,12 @@ func NewWriter(root string, media *mtx.Volume, in chan *Chunk, agg chan *Chunk, 
 	return wr
 }
 
+func (wr *Writer) Errc() <-chan error {
+	return wr.errc
+}
+
 func (wr *Writer) run() {
-	var err error
+	//var err error
 	var cnk *Chunk
 
 	// Grab chunks from all streams
@@ -74,35 +77,47 @@ func (wr *Writer) run() {
 			wr.globalSeq, string(cnk.upstream.archive),
 			cnk.id,
 		)
+		_ = fname
+		_ = cnk
 
-		wr.total += len(cnk.buf)
-		if wr.total > (1024 * 64) {
-			wr.errc <- ErrIO{syscall.ENOSPC, cnk}
-			break
-		}
+		/*
+			wr.total += len(cnk.buf)
+			if wr.total > (1024 * 64 * 16) {
+				wr.errc <- ErrIO{syscall.ENOSPC, cnk}
+				break
+			}
+		*/
 
-		var f *os.File
-		f, err = os.Create(path.Join(wr.root, fname))
-		if err != nil {
-			wr.errc <- ErrIO{err, cnk}
-			break
-		}
+		// 400 milliseconds to write a 64 MB chunk at full speed
+		time.Sleep(400 * time.Millisecond)
 
-		// write takes some time
-		//time.Sleep(1 * time.Second)
-		if _, err = f.Write(cnk.buf); err != nil {
-			wr.errc <- ErrIO{err, cnk}
-			break
-		}
+		/*
+			var f *os.File
+			f, err = os.Create(path.Join(wr.root, fname))
+			if err != nil {
+				wr.errc <- ErrIO{err, cnk}
+				break
+			}
 
-		if err = f.Close(); err != nil {
-			wr.errc <- ErrIO{err, cnk}
-			break
-		}
+			if _, err = f.Write(cnk.buf); err != nil {
+				wr.errc <- ErrIO{err, cnk}
+				break
+			}
 
-		log.Printf("writer[%v]: succesfully wrote %s", wr.drv, fname)
+			if err = f.Close(); err != nil {
+				wr.errc <- ErrIO{err, cnk}
+				break
+			}
+		*/
+
+		log.Printf("writer[%v]: succesfully wrote %s", wr.device, fname)
 
 		// report success (no error), bypassing drive
-		cnk.upstream.errc <- nil
+		//cnk.upstream.errc <- nil
+
+		// reset and return chunk to stream chunk pool
+		s := cnk.upstream
+		cnk.reset()
+		s.chunkpool.Put(cnk)
 	}
 }
