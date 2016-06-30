@@ -9,10 +9,28 @@ import (
 )
 
 type Config struct {
+	Debug      DebugConfig     `hcl:"debug"`
 	Chunkstore DBConfig        `hcl:"chunkstore"`
 	Inventory  DBConfig        `hcl:"inventory"`
 	LTFS       LTFSConfig      `hcl:"ltfs"`
 	Libraries  []LibraryConfig `hcl:"library"`
+}
+
+type DebugConfig struct {
+	Mocking MockingConfig `hcl:"mocking"`
+}
+
+type MockingConfig struct {
+	ChunkSize int           `hcl:"chunksize"`
+	Timings   TimingsConfig `hcl:"timings"`
+}
+
+type TimingsConfig struct {
+	Unmount string `hcl:"unmount"`
+	Unload  string `hcl:"unload"`
+	Load    string `hcl:"load"`
+	Mount   string `hcl:"mount"`
+	Format  string `hcl:"format"`
 }
 
 type DBConfig struct {

@@ -7,7 +7,7 @@ import (
 	"golang.org/x/net/context"
 )
 
-var DefaultPolicy = &Policy{}
+var DefaultPolicy = NewDefaultPolicy()
 
 type Policy struct {
 	AcknowledgedWrite bool
@@ -16,20 +16,31 @@ type Policy struct {
 	ExclusiveTimeout  time.Duration
 }
 
+func NewDefaultPolicy() *Policy {
+	return &Policy{
+		AcknowledgedWrite: true,
+		WriteGroup:        "none",
+		Exclusive:         false,
+		ExclusiveTimeout:  0,
+	}
+}
+
 func (pol *Policy) Parallel() bool {
-	return pol.WriteGroup != ""
+	return pol.WriteGroup != "none"
 }
 
 func Construct(req *http.Request) (*Policy, error) {
-	pol := &Policy{}
+	pol := NewDefaultPolicy()
 
 	var v string
 
-	if v = req.Header.Get("Acknowledged-Write"); v == "yes" {
-		pol.AcknowledgedWrite = true
+	if v = req.Header.Get("Acknowledged-Write"); v == "no" {
+		pol.AcknowledgedWrite = false
 	}
 
-	pol.WriteGroup = req.Header.Get("Write-Group")
+	if v = req.Header.Get("Write-Group"); v != "" {
+		pol.WriteGroup = v
+	}
 
 	if v = req.Header.Get("Exclusive"); v == "yes" {
 		pol.Exclusive = true
@@ -47,15 +58,19 @@ func Construct(req *http.Request) (*Policy, error) {
 	return pol, nil
 }
 
-type key int
+type contextKey struct {
+	name string
+}
 
-const policyKey key = 0
+func (k *contextKey) Sring() string { return "policy context value " + k.name }
+
+var PolicyContextKey = &contextKey{"policy"}
 
 func Wrap(ctx context.Context, policy *Policy) context.Context {
-	return context.WithValue(ctx, policyKey, policy)
+	return context.WithValue(ctx, PolicyContextKey, policy)
 }
 
 func Unwrap(ctx context.Context) (*Policy, bool) {
-	policy, ok := ctx.Value(policyKey).(*Policy)
+	policy, ok := ctx.Value(PolicyContextKey).(*Policy)
 	return policy, ok
 }

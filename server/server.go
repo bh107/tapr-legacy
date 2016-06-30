@@ -14,9 +14,9 @@ import (
 	"github.com/bh107/tapr/config"
 	"github.com/bh107/tapr/inventory"
 	"github.com/bh107/tapr/ltfs"
-	"github.com/bh107/tapr/mtx"
 	"github.com/bh107/tapr/stream"
 	"github.com/bh107/tapr/stream/policy"
+	"github.com/bh107/tapr/util/mtx"
 	"github.com/pkg/errors"
 
 	"github.com/boltdb/bolt"
@@ -50,7 +50,7 @@ type Server struct {
 	cfg       *config.Config
 
 	chunkdb *bolt.DB
-	inv     *inventory.DB
+	inv     *inventory.Inventory
 
 	groups map[string]*driveGroup
 
@@ -70,12 +70,12 @@ func initChunkStore(cfg *config.Config) (*bolt.DB, error) {
 	return chunkdb, nil
 }
 
-func initInventory(cfg *config.Config) (*inventory.DB, error) {
+func initInventory(cfg *config.Config) (*inventory.Inventory, error) {
 	if cfg.Inventory.Path == "" {
 		cfg.Inventory.Path = "./inventory.db"
 	}
 
-	inv, err := inventory.Open(cfg.Inventory.Path)
+	inv, err := inventory.New(cfg.Inventory.Path)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +130,7 @@ func New(cfg *config.Config, debug bool, audit bool, mock bool) (*Server, error)
 				var ok bool
 				if grp, ok = srv.groups[drvCfg.Group]; !ok {
 					grp = &driveGroup{
-						in:     make(chan *stream.Chunk, 32),
+						in:     make(chan *stream.Chunk),
 						drives: make([]*Drive, 0),
 					}
 					srv.groups[drvCfg.Group] = grp
@@ -153,12 +153,7 @@ func New(cfg *config.Config, debug bool, audit bool, mock bool) (*Server, error)
 
 	}
 
-	//	var wg sync.WaitGroup
 	for _, drv := range srv.drives["write"] {
-		//wg.Add(1)
-		//		go func(drv *Drive) {
-		//	defer wg.Done()
-
 		_, err := srv.GetScratch(drv)
 		if err != nil {
 			panic(err)
@@ -177,117 +172,13 @@ func New(cfg *config.Config, debug bool, audit bool, mock bool) (*Server, error)
 		drv.writer = stream.NewWriter(mountpoint, drv.in, agg, drv.path)
 
 		go drv.Run()
-		//		}(drv)
 	}
-
-	//	wg.Wait()
 
 	return srv, nil
 }
 
 func (srv *Server) Volumes(libname string) ([]*mtx.Volume, error) {
-	return srv.inv.Volumes(libname)
-}
-
-func (srv *Server) Load(dev *Drive, vol *mtx.Volume) error {
-	if dev.vol != nil {
-		if dev.vol.Serial == vol.Serial {
-			log.Printf("load: drive %s already loaded with %s", dev, vol)
-			return nil
-		}
-	}
-
-	err := dev.lib.chgr.Use(func(tx *changer.Tx) error {
-		log.Printf("loading drive %s with volume %s from slot %d", dev, vol, vol.Home)
-
-		/*
-			// simulate loading time
-			if srv.mocked {
-				time.Sleep(2 * time.Second)
-			}
-		*/
-
-		var err error
-		err = tx.Load(vol.Home, dev.slot)
-		if err != nil {
-			if exitError, ok := err.(*exec.ExitError); ok {
-				return errors.New(string(exitError.Stderr))
-			}
-
-			return err
-		}
-
-		return nil
-	})
-
-	if err != nil {
-		return err
-	}
-
-	dev.vol = vol
-
-	return nil
-}
-
-func (srv *Server) Unload(dev *Drive) error {
-	if dev.vol == nil {
-		log.Printf("unload: drive %s already unloaded", dev)
-		return nil
-	}
-
-	err := dev.lib.chgr.Use(func(tx *changer.Tx) error {
-		log.Printf("unloading drive %s, returning volume %s to slot %d", dev, dev.vol, dev.vol.Home)
-
-		/*
-			// simulate unloading time
-			if srv.mocked {
-				time.Sleep(2 * time.Second)
-			}
-		*/
-
-		var err error
-		err = tx.Unload(dev.vol.Home, dev.slot)
-		if err != nil {
-			if exitError, ok := err.(*exec.ExitError); ok {
-				return errors.New(string(exitError.Stderr))
-			}
-
-			return err
-		}
-
-		return nil
-	})
-
-	return err
-}
-
-func (srv *Server) Audit(ctx context.Context, libname string) (*mtx.Status, error) {
-	if lib, ok := srv.libraries[libname]; ok {
-		var status *mtx.Status
-		err := lib.chgr.Use(func(tx *changer.Tx) error {
-			var err error
-			status, err = tx.Status()
-			if err != nil {
-				if exitError, ok := err.(*exec.ExitError); ok {
-					return errors.New(string(exitError.Stderr))
-				}
-
-				return err
-			}
-
-			// we do all auditing inside the changer lock
-			err = srv.inv.Audit(status, libname)
-			return err
-		})
-
-		if err != nil {
-			return nil, err
-		}
-
-		return status, nil
-	}
-
-	return nil, errors.Errorf("unknown library: %s", libname)
+	return srv.inv.Volumes(context.Background(), libname)
 }
 
 type ErrShortWrite struct {
@@ -399,7 +290,7 @@ func (srv *Server) Store(ctx context.Context, archive string, rd io.Reader) erro
 			return err
 		}
 
-		if written, err = stream.Write(ctx, buf); err != nil {
+		if written, err = stream.Write(ctx, buf, false); err != nil {
 			return ErrShortWrite{total + written}
 		}
 
@@ -418,7 +309,7 @@ func (srv *Server) Shutdown() {
 	log.Print("shutting down...")
 	srv.chunkdb.Close()
 	log.Print("chunk database closed")
-	srv.inv.Close()
+	srv.inv.Close(context.Background())
 	log.Print("inventory database closed")
 }
 
@@ -466,6 +357,37 @@ func acquireDrive(ctx context.Context, pool []*Drive, pol *policy.Policy) (*Driv
 	}
 }
 
+// Audit performs an audit (full inventory check) of the library.
+func (srv *Server) Audit(ctx context.Context, libname string) (*mtx.StatusInfo, error) {
+	if lib, ok := srv.libraries[libname]; ok {
+		var status *mtx.StatusInfo
+		err := lib.chgr.Use(func(tx *changer.Tx) error {
+			var err error
+			status, err = tx.Status()
+			if err != nil {
+				if exitError, ok := err.(*exec.ExitError); ok {
+					return errors.New(string(exitError.Stderr))
+				}
+
+				return err
+			}
+
+			// we do all auditing inside the changer lock
+			err = srv.inv.Audit(context.Background(), status, libname)
+			return err
+		})
+
+		if err != nil {
+			return nil, err
+		}
+
+		return status, nil
+	}
+
+	return nil, errors.Errorf("unknown library: %s", libname)
+}
+
+// Scratch returns a new scratch volume.
 func (srv *Server) GetScratch(drv *Drive) (*mtx.Volume, error) {
 	if drv.vol != nil {
 		if err := srv.Unload(drv); err != nil {
@@ -473,7 +395,7 @@ func (srv *Server) GetScratch(drv *Drive) (*mtx.Volume, error) {
 		}
 	}
 
-	vol, err := srv.inv.GetScratch(drv.lib.name)
+	vol, err := srv.inv.GetScratch(context.Background(), drv.lib.name)
 	if err != nil {
 		return nil, err
 	}
@@ -508,4 +430,62 @@ func (srv *Server) GetScratch(drv *Drive) (*mtx.Volume, error) {
 	}
 
 	return vol, nil
+}
+
+func (srv *Server) Load(dev *Drive, vol *mtx.Volume) error {
+	if dev.vol != nil {
+		if dev.vol.Serial == vol.Serial {
+			log.Printf("load: drive %s already loaded with %s", dev, vol)
+			return nil
+		}
+	}
+
+	err := dev.lib.chgr.Use(func(tx *changer.Tx) error {
+		log.Printf("loading drive %s with volume %s from slot %d", dev, vol, vol.Home)
+
+		var err error
+		err = tx.Load(vol.Home, dev.slot)
+		if err != nil {
+			if exitError, ok := err.(*exec.ExitError); ok {
+				return errors.New(string(exitError.Stderr))
+			}
+
+			return err
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return err
+	}
+
+	dev.vol = vol
+
+	return nil
+}
+
+func (srv *Server) Unload(dev *Drive) error {
+	if dev.vol == nil {
+		log.Printf("unload: drive %s already unloaded", dev)
+		return nil
+	}
+
+	err := dev.lib.chgr.Use(func(tx *changer.Tx) error {
+		log.Printf("unloading drive %s, returning volume %s to slot %d", dev, dev.vol, dev.vol.Home)
+
+		var err error
+		err = tx.Unload(dev.vol.Home, dev.slot)
+		if err != nil {
+			if exitError, ok := err.(*exec.ExitError); ok {
+				return errors.New(string(exitError.Stderr))
+			}
+
+			return err
+		}
+
+		return nil
+	})
+
+	return err
 }

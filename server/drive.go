@@ -1,15 +1,15 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"path"
 	"syscall"
 
-	"github.com/bh107/tapr/mtx"
 	"github.com/bh107/tapr/stream"
 	"github.com/bh107/tapr/stream/policy"
-	"github.com/pkg/errors"
+	"github.com/bh107/tapr/util/mtx"
 	"golang.org/x/net/context"
 )
 
@@ -38,12 +38,29 @@ type Drive struct {
 	path    string
 	devtype string
 	slot    int
-	lib     *Library
-	group   *driveGroup
-
-	vol *mtx.Volume
 
 	srv *Server
+	lib *Library
+
+	group *driveGroup
+
+	vol *mtx.Volume
+}
+
+func (drv *Drive) Agg() chan *stream.Chunk {
+	if drv.group != nil {
+		return drv.group.in
+	}
+
+	return nil
+}
+
+func (drv *Drive) Mountpoint() (string, error) {
+	if drv.vol == nil {
+		return "", errors.New("no volume")
+	}
+
+	return path.Join(drv.srv.cfg.LTFS.Root, drv.devtype, drv.vol.Serial), nil
 }
 
 func (srv *Server) NewDrive(path string, devtype string, slot int, lib *Library) *Drive {
@@ -261,22 +278,6 @@ func (drv *Drive) Takeover(cnk *stream.Chunk, from *Drive) {
 
 func (drv *Drive) Ctrl(req Request) {
 	drv.ctrl <- req
-}
-
-func (drv *Drive) Agg() chan *stream.Chunk {
-	if drv.group != nil {
-		return drv.group.in
-	}
-
-	return nil
-}
-
-func (drv *Drive) Mountpoint() (string, error) {
-	if drv.vol == nil {
-		return "", errors.New("no volume")
-	}
-
-	return path.Join(drv.srv.cfg.LTFS.Root, drv.devtype, drv.vol.Serial), nil
 }
 
 func (drv *Drive) Run() {

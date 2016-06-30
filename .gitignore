@@ -23,8 +23,10 @@ _testmain.go
 *.test
 *.prof
 
-# vim swp files
+# editor tmp files
 *.swp
+*~
+.#*
 
 # database files
 *.db
@@ -36,4 +38,4 @@ data/
 attic/
 
 # binaries
-taprd
+tapr

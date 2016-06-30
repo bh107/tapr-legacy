@@ -3,13 +3,13 @@ package changer
 import (
 	"sync"
 
-	"github.com/bh107/tapr/mtx"
-	"github.com/bh107/tapr/mtx/mock"
-	"github.com/bh107/tapr/mtx/scsi"
+	"github.com/bh107/tapr/util/mtx"
+	"github.com/bh107/tapr/util/mtx/mock"
+	"github.com/bh107/tapr/util/mtx/scsi"
 )
 
 type Changer struct {
-	*mtx.Changer
+	mtx.Interface
 
 	mu sync.Mutex
 }
@@ -23,14 +23,18 @@ func Mock(path string) *Changer {
 }
 
 func newChanger(path string, mocked bool) *Changer {
+	var impl mtx.Interface
 	if mocked {
-		return &Changer{
-			Changer: mtx.NewChanger(mock.New(path)),
-		}
+		impl = mock.New(path)
+	} else {
+		impl = scsi.New(path)
 	}
-	return &Changer{
-		Changer: mtx.NewChanger(scsi.New(path)),
+
+	chgr := &Changer{
+		Interface: impl,
 	}
+
+	return chgr
 }
 
 // execute fn with exclusive use of the changer
@@ -51,14 +55,14 @@ type Tx struct {
 	chgr *Changer
 }
 
-func (tx *Tx) Status() (*mtx.Status, error) {
-	return tx.chgr.Status()
+func (tx *Tx) Status() (*mtx.StatusInfo, error) {
+	return mtx.Status(tx.chgr)
 }
 
 func (tx *Tx) Load(slot int, drivenum int) error {
-	return tx.chgr.Load(slot, drivenum)
+	return mtx.Load(tx.chgr, slot, drivenum)
 }
 
 func (tx *Tx) Unload(slot int, drivenum int) error {
-	return tx.chgr.Unload(slot, drivenum)
+	return mtx.Unload(tx.chgr, slot, drivenum)
 }

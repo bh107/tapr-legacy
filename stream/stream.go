@@ -64,7 +64,7 @@ func (s *Stream) OnClose(fn func()) {
 
 // Write writes bytes to the stream. Chunks are only flushed to backend storage
 // when they reach DefaultChunkSize.
-func (s *Stream) Write(ctx context.Context, p []byte) (n int, err error) {
+func (s *Stream) Write(ctx context.Context, p []byte, ack bool) (n int, err error) {
 	// try to assemble a chunk
 	for {
 		if len(p) == 0 {
@@ -75,7 +75,7 @@ func (s *Stream) Write(ctx context.Context, p []byte) (n int, err error) {
 
 		if n != len(p) {
 			// attempt to write chunk
-			if err := s.writeChunk(ctx, s.tmp); err != nil {
+			if err := s.writeChunk(ctx, s.tmp, ack); err != nil {
 				return n, err
 			}
 
@@ -95,8 +95,10 @@ func (s *Stream) Write(ctx context.Context, p []byte) (n int, err error) {
 // Close closes the current stream and flushed the partial chunk to backend
 // storage.
 func (s *Stream) Close(ctx context.Context) error {
+	s.tmp.last = true
+
 	// write the partial chunk, if any
-	if err := s.writeChunk(ctx, s.tmp); err != nil {
+	if err := s.writeChunk(ctx, s.tmp, true); err != nil {
 		return err
 	}
 
@@ -107,7 +109,7 @@ func (s *Stream) Close(ctx context.Context) error {
 	return nil
 }
 
-func (s *Stream) writeChunk(ctx context.Context, cnk *Chunk) error {
+func (s *Stream) writeChunk(ctx context.Context, cnk *Chunk, ack bool) error {
 	s.cnkCounter++
 	s.tmp.id = s.cnkCounter
 
@@ -116,7 +118,7 @@ func (s *Stream) writeChunk(ctx context.Context, cnk *Chunk) error {
 	// send chunk
 	s.out <- cnk
 
-	/*
+	if ack {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -125,11 +127,7 @@ func (s *Stream) writeChunk(ctx context.Context, cnk *Chunk) error {
 				return err
 			}
 		}
-
-		// reset and return chunk to stream chunk pool
-		cnk.reset()
-		s.chunkpool.Put(cnk)
-	*/
+	}
 
 	return nil
 }

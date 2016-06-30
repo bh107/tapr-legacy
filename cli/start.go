@@ -1,14 +1,12 @@
-package main
+package cli
 
 import (
 	"fmt"
 	"log"
 	"net/http"
-	_ "net/http/pprof"
 	"os"
 	"os/signal"
 
-	"github.com/bh107/tapr"
 	"github.com/bh107/tapr/api"
 	"github.com/bh107/tapr/config"
 	"github.com/bh107/tapr/server"
@@ -16,52 +14,37 @@ import (
 )
 
 var (
-	cfgFile string
-	cfg     *config.Config
+	cfg *config.Config
 
-	showVersion bool
-	flagDebug   bool
-	runAudit    bool
-	mock        bool
+	runAudit bool
+	mock     bool
 )
 
-var rootCmd = &cobra.Command{
-	Use:   "taprd",
-	Short: "Run the tapr server",
-	Long:  `YMMV.`,
-	Run:   run,
+var startCmd = &cobra.Command{
+	Use:   "start",
+	Short: "start the server",
+	Long: `
+Start the tapr tape management server.
+`,
+	Example: `  tapr start`,
+	RunE:    runStart,
 }
 
 func init() {
 	cobra.OnInitialize(initConfig)
 
-	rootCmd.PersistentFlags().StringVar(
-		&cfgFile, "config", "", "config file",
-	)
+	f := startCmd.Flags()
 
-	rootCmd.PersistentFlags().BoolVarP(&showVersion,
-		"version", "v", false, "print version info and exit",
-	)
-
-	rootCmd.PersistentFlags().BoolVarP(&flagDebug,
-		"debug", "D", false, "enable debug mode",
-	)
-
-	rootCmd.PersistentFlags().BoolVar(&mock,
+	f.BoolVar(&mock,
 		"mock", false, "enable mocking",
 	)
 
-	rootCmd.Flags().BoolVarP(&runAudit,
-		"audit", "A", false, "run initial inventory audit",
+	f.BoolVar(&runAudit,
+		"audit", false, "run initial inventory audit",
 	)
 }
 
 func initConfig() {
-	if showVersion {
-		fmt.Printf("taprd v%s\n", tapr.Version)
-		os.Exit(1)
-	}
-
 	if flagDebug {
 		log.SetFlags(log.Lshortfile | log.Ltime)
 	}
@@ -85,7 +68,7 @@ func initConfig() {
 	}
 }
 
-func run(cmd *cobra.Command, args []string) {
+func runStart(cmd *cobra.Command, args []string) error {
 	srv, err := server.New(cfg, flagDebug, runAudit, mock)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -108,12 +91,5 @@ func run(cmd *cobra.Command, args []string) {
 		os.Exit(0)
 	}()
 
-	api.Start(srv)
-}
-
-func main() {
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+	return api.Start(srv)
 }

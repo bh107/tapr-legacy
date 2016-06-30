@@ -4,7 +4,7 @@ import (
 	"container/list"
 	"fmt"
 
-	"github.com/bh107/tapr/mtx"
+	"github.com/bh107/tapr/util/mtx"
 )
 
 type Archive struct {

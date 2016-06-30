@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/bh107/tapr/mtx"
+	"github.com/bh107/tapr/util/mtx"
 )
 
 // Changer represents a mock library auto changer.

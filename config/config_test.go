@@ -7,6 +7,21 @@ import (
 )
 
 var testConfig = `
+debug {
+        mocking {
+                chunksize = 4194304
+
+                timings {
+                        unmount = "1m30s"
+                        unload = "30s"
+
+                        load = "30s"
+                        mount = "10s"
+                        format = "30s"
+                }
+        }
+}
+
 chunkstore {
         type = "boltdb"
 }
@@ -57,6 +72,18 @@ library "secondary" {
 
 func TestConfigParsing(t *testing.T) {
 	expected := &Config{
+		Debug: DebugConfig{
+			Mocking: MockingConfig{
+				ChunkSize: 4194304,
+				Timings: TimingsConfig{
+					Unmount: "1m30s",
+					Unload:  "30s",
+					Load:    "30s",
+					Mount:   "10s",
+					Format:  "30s",
+				},
+			},
+		},
 		Chunkstore: DBConfig{Type: "boltdb"},
 		Inventory:  DBConfig{Type: "sqlite3"},
 		LTFS: LTFSConfig{
